@@ -1,0 +1,143 @@
+# Required-documents catalog
+# Per SoW Section 4.5.2.
+#
+# Maps (forum, proceeding_type, deadline_category) to the list of documents
+# required by that deadline. The Procedure Tracker reads from here at run time
+# so that form-number changes do not require prompt engineering.
+#
+# Schema:
+#   <forum_key>:
+#     <proceeding_type_key>:
+#       <deadline_category>:
+#         description: "human-readable description"
+#         rule_citation: "Rule X.YZ"
+#         required_documents:
+#           - name: "formal document name"
+#             form_number: "Form NN" or null
+#             notes: "optional note"
+#
+# This catalog is INCOMPLETE. It is seeded with the common items per the SoW
+# examples. Claude Code is expected to expand it during Phase 2 Procedure
+# Tracker work, with user review of additions.
+
+superior_court_ontario:
+  ordinary_procedure:
+    statement_of_defence:
+      description: "Statement of Defence due 20 days after service of Statement of Claim within Ontario"
+      rule_citation: "Rule 18.01"
+      required_documents:
+        - name: "Statement of Defence"
+          form_number: "Form 18A"
+          notes: ""
+        - name: "Notice of Intent to Defend (where applicable)"
+          form_number: "Form 18B"
+          notes: "extends time to deliver Statement of Defence by 10 days"
+
+    affidavit_of_documents:
+      description: "Affidavit of Documents within 10 days after close of pleadings"
+      rule_citation: "Rule 30.03"
+      required_documents:
+        - name: "Affidavit of Documents (party)"
+          form_number: "Form 30A"
+          notes: "for individuals"
+        - name: "Affidavit of Documents (corporation)"
+          form_number: "Form 30B"
+          notes: "for corporations and similar entities"
+
+  simplified_procedure:
+    statement_of_defence:
+      description: "Statement of Defence under simplified procedure"
+      rule_citation: "Rule 76 / Rule 18.01"
+      required_documents:
+        - name: "Statement of Defence"
+          form_number: "Form 18A"
+          notes: ""
+
+small_claims_court_ontario:
+  defended_claim:
+    settlement_conference:
+      description: "Documents required for settlement conference"
+      rule_citation: "Rule 13"
+      required_documents:
+        - name: "Settlement Conference Brief"
+          form_number: null
+          notes: "served on opposing parties and filed with court 14 days before conference"
+        - name: "List of Proposed Witnesses"
+          form_number: null
+          notes: ""
+        - name: "Documents intended to be relied on at trial"
+          form_number: null
+          notes: ""
+
+landlord_tenant_board:
+  l1_application:
+    filing:
+      description: "Application to Evict a Tenant for Non-payment of Rent"
+      rule_citation: "RTA s. 87; LTB Rules"
+      required_documents:
+        - name: "Form L1 — Application to Evict a Tenant for Non-payment of Rent"
+          form_number: "L1"
+          notes: ""
+        - name: "Form N4 — Notice to End your Tenancy Early for Non-payment of Rent"
+          form_number: "N4"
+          notes: "must be served BEFORE the L1 is filed; N4 termination date governs"
+        - name: "Certificate of Service"
+          form_number: null
+          notes: "for the N4 notice"
+        - name: "Rent ledger / arrears statement"
+          form_number: null
+          notes: ""
+
+  l2_application:
+    filing:
+      description: "Application to End a Tenancy and Evict a Tenant — ground-dependent"
+      rule_citation: "RTA Part V"
+      required_documents:
+        - name: "Form L2 — Application to End a Tenancy and Evict a Tenant"
+          form_number: "L2"
+          notes: "predicate notice required — see ground-specific notes below"
+      ground_specific_notices:
+        substantial_interference:
+          rule_citation: "RTA s. 64"
+          notice:
+            name: "Form N5 — Notice to End your Tenancy For Interfering with Others, Damage or Overcrowding"
+            form_number: "N5"
+        illegal_act:
+          rule_citation: "RTA s. 61"
+          notice:
+            name: "Form N6 — Notice to Terminate a Tenancy Early — Illegal Act or Misrepresentation of Income"
+            form_number: "N6"
+        serious_impairment:
+          rule_citation: "RTA s. 63"
+          notice:
+            name: "Form N7 — Notice to End your Tenancy For Causing Serious Problems in the Rental Unit or Residential Complex"
+            form_number: "N7"
+        persistent_late_payment:
+          rule_citation: "RTA s. 58"
+          notice:
+            name: "Form N8 — Notice to End your Tenancy at the End of the Term"
+            form_number: "N8"
+        own_use:
+          rule_citation: "RTA s. 48"
+          notice:
+            name: "Form N12 — Notice to End your Tenancy Because the Landlord, a Purchaser or a Family Member Requires the Rental Unit"
+            form_number: "N12"
+            notes: "one month's rent compensation required under RTA s. 48.1"
+        demolition_repair_conversion:
+          rule_citation: "RTA s. 50"
+          notice:
+            name: "Form N13 — Notice to End your Tenancy Because the Landlord Wants to Demolish the Rental Unit, Repair it or Convert it to Another Use"
+            form_number: "N13"
+
+court_of_appeal_ontario:
+  civil_appeal:
+    notice_of_appeal:
+      description: "Notice of Appeal must be served and filed within 30 days of the order appealed from"
+      rule_citation: "Rule 61.04"
+      required_documents:
+        - name: "Notice of Appeal"
+          form_number: "Form 61A"
+          notes: ""
+        - name: "Certificate Respecting Evidence"
+          form_number: "Form 61C"
+          notes: ""

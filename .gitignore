@@ -1,0 +1,43 @@
+# Secrets
+.env
+*.key
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Vector DB persistent storage
+qdrant_storage/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test outputs
+test-output/
+.pytest_cache/
+
+# User data (matters are confidential; never commit)
+data/matters/
+data/test_matter/
+data/adversarial_matter/
+
+# But DO commit the directory structure
+!data/.gitkeep
+!data/test_matter/.gitkeep
+!data/adversarial_matter/.gitkeep

@@ -1,0 +1,74 @@
+# Authoritative URLs for procedure-rule retrieval and Notice-to-Profession discovery.
+# Per SoW Section 4.5.1. These URLs are consulted by the Procedure Tracker at run time;
+# cached content older than 24 hours triggers a fresh fetch.
+#
+# When a URL changes, update this file rather than the Python code. The Procedure
+# Tracker reads from here; it does not hardcode URLs.
+
+forums:
+  superior_court_ontario:
+    name: "Ontario Superior Court of Justice"
+    primary_rules:
+      title: "Rules of Civil Procedure, R.R.O. 1990, Reg. 194"
+      url: "https://www.canlii.org/en/on/laws/regu/rro-1990-reg-194/latest/rro-1990-reg-194.html"
+      source: "CanLII"
+    practice_directions:
+      title: "Notices to the Profession — Superior Court of Justice"
+      url: "https://www.ontariocourts.ca/scj/practice/practice-directions/"
+      source: "Ontario Courts"
+
+  small_claims_court_ontario:
+    name: "Ontario Small Claims Court"
+    primary_rules:
+      title: "Rules of the Small Claims Court, O. Reg. 258/98"
+      url: "https://www.canlii.org/en/on/laws/regu/o-reg-258-98/latest/o-reg-258-98.html"
+      source: "CanLII"
+    practice_directions:
+      title: "Small Claims Court Notices to the Profession"
+      url: "https://www.ontariocourts.ca/scj/practice/practice-directions/"
+      source: "Ontario Courts"
+
+  landlord_tenant_board:
+    name: "Landlord and Tenant Board (Tribunals Ontario)"
+    primary_rules:
+      title: "Residential Tenancies Act, 2006, S.O. 2006, c. 17"
+      url: "https://www.canlii.org/en/on/laws/stat/so-2006-c-17/latest/so-2006-c-17.html"
+      source: "CanLII"
+    secondary_rules:
+      title: "LTB Rules of Procedure"
+      url: "https://tribunalsontario.ca/ltb/rules-practice-directions-guidelines/"
+      source: "Tribunals Ontario"
+    practice_directions:
+      title: "LTB Interpretation Guidelines"
+      url: "https://tribunalsontario.ca/ltb/rules-practice-directions-guidelines/"
+      source: "Tribunals Ontario"
+
+  court_of_appeal_ontario:
+    name: "Ontario Court of Appeal"
+    primary_rules:
+      title: "Rules of Civil Procedure (appellate provisions)"
+      url: "https://www.canlii.org/en/on/laws/regu/rro-1990-reg-194/latest/rro-1990-reg-194.html"
+      source: "CanLII"
+    practice_directions:
+      title: "Practice Directions — Court of Appeal for Ontario"
+      url: "https://www.ontariocourts.ca/coa/practice-directions/"
+      source: "Ontario Courts"
+
+  federal_court:
+    name: "Federal Court of Canada"
+    primary_rules:
+      title: "Federal Courts Rules, SOR/98-106"
+      url: "https://www.canlii.org/en/ca/laws/regu/sor-98-106/latest/sor-98-106.html"
+      source: "CanLII"
+    practice_directions:
+      title: "Notices and Practice Directions — Federal Court"
+      url: "https://www.fct-cf.gc.ca/en/pages/law-and-practice/notices"
+      source: "Federal Court"
+
+# CanLII case-law search
+canlii_case_search:
+  base_url: "https://www.canlii.org/en/"
+  api_docs: "https://www.canlii.org/en/info/api.html"
+  # The CanLII API requires registration. The free tier rate-limits aggressively;
+  # for the test matter we use scraping with respectful delays. For production
+  # use, register at https://www.canlii.org/en/info/api.html
