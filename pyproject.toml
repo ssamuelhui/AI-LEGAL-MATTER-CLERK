@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "matter-clerk"
+version = "0.1.0"
+description = "Document-grounded AI tool for Canadian legal work (per docs/SoW.docx)."
+requires-python = ">=3.11"
+dependencies = [
+    "pypdf>=5.0",
+    "qdrant-client>=1.12",
+    "sentence-transformers>=3.0",
+    "openai>=1.50",
+    "pydantic>=2.0",
+    "python-dotenv>=1.0",
+    "tiktoken>=0.7",
+]
+
+[project.scripts]
+matter-clerk = "matter_clerk.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
