@@ -40,6 +40,30 @@ The point of this log is to make later "why did we do it this way?" questions an
 **Alternatives considered:** Single shared collection with per-document filters (premature — the matter concept will reorganise this in Phase 1 later anyway); name from filename (collides on identical names with different contents).
 **Consequences:** This scheme is explicitly Day-1 only. When the matter concept lands later in Phase 1, one collection per matter (with document-level filter) replaces this; the `day1-*` collections become disposable.
 
+## 2026-06-04: Pipeline orchestration extracted into `pipeline.py`
+**Context:** Day 1 inlined ingest → retrieve → answer inside `cli.py`. Day 2 needs the same flow driven from a Flask request handler. Duplicating the orchestration would mean the CLI and the web UI could drift, and any later change (Phase 2 CanLII augmentation, Phase 3 feedback hook) would need to be made twice.
+**Decision:** Move the orchestration to `pipeline.run_query(pdf_path, source_name, question, top_k, reindex, collection) -> PipelineResult` (pydantic). `cli.py` and `web.py` are now thin formatters around the same call. Pipeline failures are surfaced via `QdrantUnreachable` and `PdfHasNoText` exceptions so each caller can render them appropriately.
+**Alternatives considered:** Keep `cli.py` authoritative and have the web handler shell out to it (slow and string-marshalled); duplicate the code (predictable drift).
+**Consequences:** `source_name` is now separate from `pdf_path` — required because the web handler hands the pipeline a tempfile path but wants citations to read the original upload's filename. CLI behaviour is unchanged.
+
+## 2026-06-04: Flask + synchronous form-post for the local web UI
+**Context:** Day 2 wraps the existing pipeline in a browser-accessible UI. Single-user, localhost-only, no auth, no concurrent load.
+**Decision:** Flask 3 with two routes (`GET /`, `POST /ask`), Jinja templates inside the package (`src/matter_clerk/templates/`), and inline CSS in `base.html`. The dev server is started via `werkzeug.serving.make_server` directly (not `app.run`) so the startup banner is ours and the Werkzeug access log is suppressed. Port defaults to 5050 (overridable via `MATTER_CLERK_PORT`) — avoids the common 5000/5001 collisions.
+**Alternatives considered:** FastAPI + Starlette (richer than needed for two routes; Jinja support is less native); async + polling progress (no UX benefit when the LLM call dominates total latency); HTMX (adds a dep for one form-post).
+**Consequences:** Server is single-process. Re-reading file changes requires restarting `python -m matter_clerk.web` (no auto-reload, by design — predictable shutdown semantics matter more than dev convenience here).
+
+## 2026-06-04: In-flight requests run to completion on Ctrl+C (`daemon_threads = False`)
+**Context:** Werkzeug's `ThreadedWSGIServer` sets `daemon_threads = True` by default. Under that default, SIGINT during a request kills the worker thread without running `finally` clauses — which would leak the upload tmp file we create in `web.ask`.
+**Decision:** Set `server.daemon_threads = False` after constructing the server. Ctrl+C closes the listening socket immediately and the process waits for in-flight requests to finish before exiting; their `try/finally: tmp_path.unlink(missing_ok=True)` runs.
+**Alternatives considered:** Register `atexit` cleanup that scans for orphaned tmp files (fragile, cross-platform-ugly); switch to `threaded=False` (would block the index page while `/ask` is processing — minor but real UX regression).
+**Consequences:** "Press Ctrl+C to stop" may pause for a few seconds if the LLM call is mid-flight when the signal arrives. A second Ctrl+C still escapes. No tmp-file leakage in either path.
+
+## 2026-06-04: Markdown rendered via `markdown` + sanitised through `bleach`
+**Context:** The LLM emits markdown. The web result page must render that — including tables, for the timeline output coming in Day 3. A localhost-only tool is still a self-XSS surface if the model returns `<script>` or `<img onerror=…>`.
+**Decision:** Pipeline → `markdown.Markdown(extensions=["tables", "fenced_code"])` → `bleach.clean` with a prose+table allowlist (`p, br, hr, em, strong, code, pre, ul, ol, li, blockquote, h1–h6, table, thead, tbody, tr, th, td`). No `<a>`, no `<img>`, no `<script>`, no inline `style`, no attributes at all.
+**Alternatives considered:** `markdown-it-py` (also good; `markdown` is older but smaller and the table extension is solid); skip sanitisation given localhost-only (small risk × zero cost to mitigate = mitigate).
+**Consequences:** The bracket-citation strings `[filename.pdf p.N]` render as inline text (correct — they're not links yet). When Phase 2 introduces verified CanLII URLs, this entry should be revisited to widen the allowlist to include `<a href>` with a URL-scheme check.
+
 ## 2026-05-28: Per-page token-window chunking (no cross-page chunks)
 **Context:** SoW §4.1 specifies 600–800-token chunks with ~100-token overlap, each tagged with source filename and page number. The natural way to honour the "tagged with page number" requirement is to never let a chunk straddle a page boundary.
 **Decision:** Chunk within each page independently using `tiktoken` cl100k_base for token counting; chunk size 700, overlap 100. Every chunk maps to exactly one page citation.

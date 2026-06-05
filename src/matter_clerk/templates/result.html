@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<nav><a href="/">&larr; Ask another question</a></nav>
+
+<section class="block">
+  <h2>Question</h2>
+  <div class="question">{{ question }}</div>
+</section>
+
+{% if skipped_pages %}
+<div class="banner warn">
+  <strong>Skipped {{ skipped_pages|length }} page(s)</strong> with no extractable
+  text (likely scanned; OCR is deferred to ING-2): {{ skipped_pages|join(", ") }}.
+</div>
+{% endif %}
+
+<section class="block">
+  <h2>Answer</h2>
+  <div class="answer">{{ answer_html|safe }}</div>
+</section>
+
+<section class="block">
+  <h2>Citations</h2>
+  <ul class="citations">
+    {% for c in citations %}
+    <li>[{{ c.source }} {{ c.page_or_paragraph }}] &nbsp; &ldquo;{{ c.text_snippet }}&rdquo;</li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section class="block">
+  <h2>Run metadata</h2>
+<div class="metadata">model: {{ model }}
+retrieval: top-{{ top_k }} semantic ({{ embed_model }})
+timestamp: {{ timestamp }}
+pdf_sha256: {{ pdf_sha256 }}</div>
+</section>
+{% endblock %}

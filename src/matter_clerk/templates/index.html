@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block content %}
+{% if not qdrant_ok %}
+<div class="banner error">
+  <strong>Qdrant is not reachable.</strong> Start it with
+  <code>docker compose up -d</code> and reload this page.
+  {% if qdrant_err %}<div style="margin-top:6px;font-size:12px;">({{ qdrant_err }})</div>{% endif %}
+</div>
+{% else %}
+{% if error %}<div class="banner error">{{ error }}</div>{% endif %}
+<form method="post" action="/ask" enctype="multipart/form-data" id="askform">
+  <label for="pdf">PDF</label>
+  <input id="pdf" name="pdf" type="file" accept="application/pdf" required>
+
+  <label for="question">Question</label>
+  <textarea id="question" name="question" required
+            placeholder="What is the principal claim and who advances it?">{{ question or "" }}</textarea>
+
+  <details>
+    <summary>Advanced</summary>
+    <div class="row">
+      <div>
+        <label for="top_k">Top-K</label>
+        <input id="top_k" name="top_k" type="number" min="1" max="50"
+               value="{{ top_k or 8 }}">
+      </div>
+      <div>
+        <label style="font-weight: 400;">
+          <input type="checkbox" name="reindex" {% if reindex %}checked{% endif %}>
+          Force reindex
+        </label>
+      </div>
+    </div>
+  </details>
+
+  <button type="submit" id="askbtn">Ask</button>
+</form>
+<script>
+  document.getElementById("askform").addEventListener("submit", function() {
+    var b = document.getElementById("askbtn");
+    b.disabled = true;
+    b.textContent = "Processing…";
+  });
+</script>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Matter Clerk{% block subtitle %}{% endblock %}</title>
+  <style>
+    body { font: 15px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif;
+           max-width: 820px; margin: 32px auto; padding: 0 16px; color: #222; }
+    h1 { font-size: 20px; margin: 0 0 4px 0; }
+    .sub { color: #666; font-size: 13px; margin-bottom: 24px; }
+    label { display: block; margin: 14px 0 4px; font-weight: 600; font-size: 13px; }
+    input[type="file"], textarea, input[type="text"], input[type="number"] {
+      width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px;
+      font: inherit; box-sizing: border-box;
+    }
+    textarea { min-height: 90px; resize: vertical; }
+    button { background: #1f6feb; color: white; border: 0; padding: 10px 18px;
+             border-radius: 4px; font-size: 15px; cursor: pointer; margin-top: 14px; }
+    button:disabled { background: #999; cursor: progress; }
+    details { margin-top: 12px; }
+    summary { cursor: pointer; color: #555; font-size: 13px; }
+    details .row { display: flex; gap: 16px; align-items: flex-end; margin-top: 8px; }
+    details .row > * { flex: 1; }
+    .banner { padding: 10px 14px; border-radius: 4px; margin: 14px 0; font-size: 14px; }
+    .banner.error { background: #fee; border: 1px solid #f5b5b5; color: #8a1f1f; }
+    .banner.warn  { background: #fff8e1; border: 1px solid #f0d488; color: #6a4a00; }
+    .banner code  { background: rgba(0,0,0,.05); padding: 1px 4px; border-radius: 3px; }
+    nav a { color: #1f6feb; text-decoration: none; font-size: 13px; }
+    nav a:hover { text-decoration: underline; }
+    section.block { margin-top: 28px; }
+    section.block > h2 { font-size: 12px; letter-spacing: .1em;
+                         text-transform: uppercase; color: #666;
+                         border-bottom: 1px solid #eee; padding-bottom: 6px; margin-bottom: 12px; }
+    .answer { font-size: 15px; }
+    .answer table { border-collapse: collapse; margin: 12px 0; width: 100%; }
+    .answer th, .answer td { border: 1px solid #ccc; padding: 6px 10px; text-align: left;
+                              vertical-align: top; }
+    .answer th { background: #f6f6f6; }
+    .answer pre { background: #f6f6f6; padding: 10px; overflow-x: auto; border-radius: 4px; }
+    .answer code { background: #f6f6f6; padding: 1px 4px; border-radius: 3px; font-size: 13px; }
+    .answer blockquote { border-left: 3px solid #ddd; margin: 10px 0; padding: 2px 12px;
+                          color: #555; }
+    .citations { padding-left: 20px; }
+    .citations li { font-family: ui-monospace, Menlo, Consolas, monospace;
+                    font-size: 13px; color: #333; margin: 4px 0; }
+    .metadata { font-family: ui-monospace, Menlo, Consolas, monospace;
+                font-size: 13px; color: #555; white-space: pre-wrap;
+                background: #fafafa; padding: 10px 12px; border-radius: 4px; }
+    .question { background: #f6f6f6; padding: 10px 14px; border-radius: 4px;
+                font-style: italic; color: #444; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Matter Clerk</h1>
+    <div class="sub">Local document-grounded Q&amp;A &middot; Day 2 (single PDF)</div>
+  </header>
+  {% block content %}{% endblock %}
+</body>
+</html>
