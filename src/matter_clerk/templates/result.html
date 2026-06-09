@@ -7,10 +7,16 @@
   <div class="question">{{ question }}</div>
 </section>
 
-{% if skipped_pages %}
+{% if ocr_pages %}
+<div class="banner info">
+  <strong>OCR recovered {{ ocr_pages|length }} page(s)</strong> where direct
+  text extraction was empty: {{ ocr_pages|join(", ") }}.
+</div>
+{% endif %}
+{% if unreadable_pages %}
 <div class="banner warn">
-  <strong>Skipped {{ skipped_pages|length }} page(s)</strong> with no extractable
-  text (likely scanned; OCR is deferred to ING-2): {{ skipped_pages|join(", ") }}.
+  <strong>{{ unreadable_pages|length }} page(s) unreadable</strong> after OCR
+  (no extractable text and not blank): {{ unreadable_pages|join(", ") }}.
 </div>
 {% endif %}
 

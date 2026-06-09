@@ -58,10 +58,14 @@ def main(argv: list[str] | None = None) -> int:
     except pipeline.PdfHasNoText as e:
         sys.exit(f"ERROR: {e}")
 
-    if result.skipped_pages:
+    if result.ocr_pages:
+        log.info(
+            f"INFO: recovered {len(result.ocr_pages)} page(s) via OCR: {result.ocr_pages}"
+        )
+    if result.unreadable_pages:
         log.warning(
-            f"WARN: skipped {len(result.skipped_pages)} page(s) with no extractable text "
-            f"(likely scanned; OCR is deferred to ING-2): {result.skipped_pages}"
+            f"WARN: {len(result.unreadable_pages)} page(s) unreadable after OCR "
+            f"(no extractable text and not blank): {result.unreadable_pages}"
         )
 
     print("[ANSWER]")

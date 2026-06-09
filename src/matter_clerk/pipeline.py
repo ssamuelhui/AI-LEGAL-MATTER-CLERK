@@ -36,7 +36,8 @@ class PdfHasNoText(RuntimeError):
 class PipelineResult(BaseModel):
     answer: str
     citations: list[Citation]
-    skipped_pages: list[int]
+    ocr_pages: list[int]
+    unreadable_pages: list[int]
     model: str
     embed_model: str
     top_k: int
@@ -78,11 +79,16 @@ def run_query(
 
     coll = collection or default_collection_name(pdf_path)
     needs_index = reindex or not collection_exists(client, coll)
-    skipped: list[int] = []
+    ocr_pages: list[int] = []
+    unreadable_pages: list[int] = []
 
     if needs_index:
         log.info(f"Ingesting {source_name} ...")
-        pages, skipped = extract_pdf_pages(pdf_path)
+        pages, ocr_pages, unreadable_pages = extract_pdf_pages(pdf_path)
+        log.info(
+            f"Extracted {len(pages)} page(s) "
+            f"({len(ocr_pages)} via OCR, {len(unreadable_pages)} unreadable)"
+        )
         if not pages:
             raise PdfHasNoText(
                 f"No extractable text on any page of {source_name}."
@@ -141,7 +147,8 @@ def run_query(
     return PipelineResult(
         answer=answer.strip(),
         citations=citations,
-        skipped_pages=skipped,
+        ocr_pages=ocr_pages,
+        unreadable_pages=unreadable_pages,
         model=model,
         embed_model=embed_model,
         top_k=top_k,
