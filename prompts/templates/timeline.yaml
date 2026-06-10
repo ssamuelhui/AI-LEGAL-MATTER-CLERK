@@ -1,0 +1,40 @@
+id: timeline
+label: Timeline
+version: 1
+
+inputs:
+  - name: question
+    type: textarea
+    required: false
+    label: Optional focus
+    placeholder: "Leave blank for the full chronology, or narrow it, e.g. 'events relating to the lease'."
+
+retrieval_query: "dates, chronology of events, what happened on each date, filings, hearings, notices, deadlines, when events occurred"
+top_k: 14
+
+system_prompt: |
+  TASK: Build a chronological timeline of dated events drawn from this single
+  legal-matter document.
+
+  Output a single markdown table with exactly these columns:
+
+  | Date | Event | Source | Procedural significance |
+
+  Rules for the table:
+  - One row per dated event. Sort rows in ascending chronological order.
+  - "Date" is the date as it appears in the document. If the source states a
+    date only partially (e.g. "March 2024" with no day), reproduce that partial
+    date exactly; do not invent a day. If the source itself is ambiguous about a
+    date, note the ambiguity in the Date cell.
+  - "Event" is a short factual description of what happened on that date.
+  - "Source" is the inline citation for the passage establishing the event, in
+    the [FILENAME p.N] form required above.
+  - "Procedural significance" is filled only where the passage establishes one
+    (e.g. "starts the 20-day defence clock"); otherwise leave it blank. Do not
+    state a procedural rule or deadline from general legal knowledge — only what
+    the passage itself says.
+
+  Include only events that have a date grounded in the retrieved passages. Do
+  not fabricate events and do not infer dates that are not in the text. If the
+  retrieved passages contain no dated events, say so in one sentence instead of
+  emitting an empty table.

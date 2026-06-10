@@ -16,6 +16,42 @@ The point of this log is to make later "why did we do it this way?" questions an
 
 ## Decisions
 
+## 2026-06-09: Day-3 — task templates are YAML, one file per task, in `prompts/templates/`
+**Context:** SoW §3.10 / §5.5 require the task system prompts to be versionable files (one per task), readable by the user, and diffable by the Phase 3 prompt curator. Day 1/2 had a single hardcoded `DAY1_SYSTEM_PROMPT` in `prompts.py`.
+**Decision:** Each task is one YAML file in `prompts/templates/<id>.yaml`, loaded into a validated `TaskTemplate` pydantic model on startup (cached). A file carries: `id`, `label`, `version`, `system_prompt` (task body only), `retrieval_query` (seed), `top_k`, and an `inputs` list. The loader enforces `id == filename` and rejects duplicates/empties. PyYAML is added as a dependency (also needed for `config/sources.yaml` + `required_docs.yaml` in Phase 2).
+**Alternatives considered:** TOML via stdlib `tomllib` (zero new dep, but poor multi-line-prose ergonomics for quotation-heavy legal prompts); JSON (escapes multi-line prompts into one unreadable/undiffable line); a Python module per task (mixes executable code with data, weakens the versioning/curator story). YAML block scalars diff cleanly and read well — chosen for that.
+**Consequences:** Adding a task = adding a YAML file (the UI and prompt assembly are generic). Templates live at repo root, outside the `src/` package; the loader resolves `parents[2]/prompts/templates` with a `MATTER_CLERK_PROMPTS_DIR` override. Not shipped as package data — acceptable for a repo-run dev tool.
+
+## 2026-06-09: Day-3 — §1.4 safety clause is code-owned and prepended at runtime
+**Context:** SoW §1.4.1 requires a *"non-removable system-prompt clause"* forbidding fabricated authority. If that clause lived inside each task's YAML, a template author — or the Phase 3 curator proposing a diff — could weaken or delete it.
+**Decision:** The safety/citation-discipline text is the `SAFETY_PREAMBLE` constant in `prompts.py`. `build_system_prompt(template)` returns `SAFETY_PREAMBLE + "\n\n" + template.system_prompt`. Templates carry only the task-specific body. The preamble also asserts matter-only mode (no external authority, no legal tests/elements from memory), satisfying §1.4.1/§1.4.2 on the prompt side for every task uniformly.
+**Alternatives considered:** Duplicating the clause into each YAML (drift + deletable); a separate `_safety.yaml` partial (still file-editable, still deletable). Code ownership is what makes "non-removable" literally true.
+**Consequences:** Citation discipline is identical across all six tasks and cannot be edited away by template work. Draft Memo / Correspondence additionally carry an in-body matter-only refusal instruction (flag the gap rather than supply authority from memory) layered on top of the preamble.
+
+## 2026-06-09: Day-3 — free-form Q&A becomes the Find Facts task; `task`+`structured_inputs` threaded through the pipeline
+**Context:** Day 1/2 exposed a single free-form question box. Day 3 introduces named tasks; we did not want to keep a separate "free-form" mode alongside them.
+**Decision:** The free-form path *is* the `find_facts` task (its YAML body is the old Day-1 prompt: answer directly, refuse when unsupported). `find_facts` is the default-selected task, so existing behaviour is preserved, not removed. `pipeline.run_query` now takes `task: str` + `structured_inputs: dict` instead of `question: str`; `top_k` became `int | None` (None = use the template's per-task default). CLI gains `--task` (default `find_facts`) plus `--question`/`--recipient`/`--categories`; `PipelineResult` gains `task`.
+**Alternatives considered:** Keep a distinct free-form mode plus tasks (two code paths for the same thing); a flag enum instead of a string task id (the id maps 1:1 to a YAML filename — a string is the natural key).
+**Consequences:** One uniform path for all six tasks. Required-input validation is centralized in `prompts.missing_required_inputs` and called by both CLI and web before any expensive work.
+
+## 2026-06-09: Day-3 — generic `inputs` descriptor drives both the form and prompt assembly
+**Context:** Tasks need different inputs (Find Facts/Memo: a question; Correspondence: recipient + body; Find Entities: a category multiselect; Summarize/Timeline: an optional focus or nothing).
+**Decision:** Each template declares an `inputs` list of `InputField`s (`name`, `type` ∈ {text, textarea, multiselect}, `required`, `label`, `placeholder`, `options`, `default`). The web form renders controls from this list (all tasks' fields are rendered, then JS shows the selected task's group and disables the rest so hidden fields neither submit nor trip HTML5 `required`). `build_user_message` folds the same inputs into the `REQUEST:` block by label. This is slightly more than the six tasks strictly need, but it is the actual shape of the remaining SoW tasks (Draft Pleading's pleading-type/party-role selects, Phase-2 output-mode selector) — so it is the right investment, not over-engineering.
+**Alternatives considered:** Special-casing each task in the template + handler (doesn't scale to 10 tasks); a separate GET round-trip on dropdown change to re-render fields (loses the chosen file).
+**Consequences:** Adding a task with new input types may require a new render branch in `index.html`, but no handler/pipeline changes.
+
+## 2026-06-09: Day-3 — query-less tasks retrieve via a per-template seed query
+**Context:** Summarize / Timeline / Find Entities may run with no user question, but semantic retrieval needs a query vector.
+**Decision:** Each template carries a `retrieval_query` seed describing what that task generally needs to surface (e.g. Summarize seeds on "parties, dispute, key documents, principal facts, procedural posture"). `build_retrieval_query` concatenates the seed with any user-supplied input text and never returns empty. `top_k` is tuned per task (entities/timeline retrieve wider) and is overridable from the Advanced box / `--top-k`.
+**Alternatives considered:** Whole-document stuffing (not viable at the SoW's 50–200-page matter size); a fixed global query (ignores what each task actually needs).
+**Consequences:** Citations remain grounded in retrieved passages for every task. Citation extraction still lists every retrieved chunk (not yet parsed from the model's actual inline cites) — unchanged from Day 1/2; tightening it is backlogged.
+
+## 2026-06-09: Day-3 — Compare Clauses deferred to Day 4; Draft Pleading to Day 3.5
+**Context:** Day 3 ships six of the ten SoW tasks. Compare Clauses is defined as a cross-document comparison (§3 table), but Day 3 is still single-PDF (the matter concept is Day 4). Draft Pleading needs the DRAFT-watermark + non-removable cover-note machinery (§1.4.3, §4.6).
+**Decision:** Compare Clauses is deferred whole to Day 4 rather than shipped as a within-document workaround — a single-PDF version would mistrain the user to think of it as within-document when it is meant to be across-document. Draft Pleading is deferred to a dedicated Day 3.5 for its watermark/cover-note workflow.
+**Alternatives considered:** Within-document Compare Clauses now (rejected: wrong mental model); folding Pleading into Day 3 (rejected: §1.4.3 machinery warrants its own slice).
+**Consequences:** Day 3 covers Summarize, Timeline, Find Facts, Find Entities, Draft Memo, Draft Correspondence. The two deferrals are tracked for Day 4 and Day 3.5 respectively.
+
 ## 2026-05-28: OpenAI SDK as the OpenRouter transport for LLMClient
 **Context:** CLAUDE.md requires that the LLM provider be swappable with a one-file change. OpenRouter is the default provider per the SoW (MiMo Pro), but the user may swap to Claude or another model for testing.
 **Decision:** `LLMClient` in `src/matter_clerk/llm.py` uses the `openai` Python SDK pointed at OpenRouter's base URL (`https://openrouter.ai/api/v1`). OpenRouter speaks the OpenAI chat-completions protocol, so this is the smallest viable abstraction.

@@ -1,10 +1,16 @@
 {% extends "base.html" %}
 {% block content %}
-<nav><a href="/">&larr; Ask another question</a></nav>
+<nav><a href="/">&larr; Run another task</a></nav>
 
 <section class="block">
-  <h2>Question</h2>
-  <div class="question">{{ question }}</div>
+  <h2>{{ task_label }} &middot; matter-only</h2>
+  {% if request_summary %}
+  <div class="question">
+    {% for k, v in request_summary.items() %}
+    <div><strong>{{ k }}:</strong> {{ v if v is string else v|join(", ") }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
 </section>
 
 {% if ocr_pages %}

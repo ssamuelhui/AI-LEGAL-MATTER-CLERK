@@ -12,6 +12,12 @@ from flask import Flask, render_template, request
 from werkzeug.serving import make_server
 
 from . import pipeline
+from .prompts import (
+    DEFAULT_TASK,
+    get_template,
+    missing_required_inputs,
+    ordered_templates,
+)
 from .vectorstore import connect
 
 log = logging.getLogger("matter_clerk.web")
@@ -45,37 +51,78 @@ def _qdrant_ok() -> tuple[bool, str | None]:
         return False, str(e)
 
 
+def _collect_web_inputs(template, form) -> dict:
+    """Pull this task's declared inputs out of the submitted form."""
+    inputs: dict = {}
+    for field in template.inputs:
+        if field.type == "multiselect":
+            vals = form.getlist(field.name)
+            if vals:
+                inputs[field.name] = vals
+        else:
+            val = (form.get(field.name) or "").strip()
+            if val:
+                inputs[field.name] = val
+    return inputs
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB
 
+    def render_index(status=200, **kw):
+        defaults = dict(
+            qdrant_ok=True,
+            qdrant_err=None,
+            tasks=ordered_templates(),
+            selected_task=DEFAULT_TASK,
+            values={},
+            top_k="",
+            reindex=False,
+        )
+        defaults.update(kw)
+        return render_template("index.html", **defaults), status
+
     @app.get("/")
     def index():
         ok, err = _qdrant_ok()
-        return render_template("index.html", qdrant_ok=ok, qdrant_err=err)
+        return render_index(qdrant_ok=ok, qdrant_err=err)[0]
 
     @app.post("/ask")
     def ask():
         upload = request.files.get("pdf")
-        question = (request.form.get("question") or "").strip()
+        task = request.form.get("task") or DEFAULT_TASK
+        top_k_raw = (request.form.get("top_k") or "").strip()
         try:
-            top_k = int(request.form.get("top_k") or 8)
+            top_k = int(top_k_raw) if top_k_raw else None
         except ValueError:
-            top_k = 8
+            top_k = None
         reindex = bool(request.form.get("reindex"))
 
+        try:
+            template = get_template(task)
+        except KeyError:
+            return render_index(
+                status=400, error=f"Unknown task: {task}.", top_k=top_k_raw,
+                reindex=reindex,
+            )
+
+        structured_inputs = _collect_web_inputs(template, request.form)
+        common = dict(
+            selected_task=task, values=structured_inputs,
+            top_k=top_k_raw, reindex=reindex,
+        )
+
         if not upload or not upload.filename:
-            return render_template(
-                "index.html", qdrant_ok=True, qdrant_err=None,
-                error="Please choose a PDF.",
-                question=question, top_k=top_k, reindex=reindex,
-            ), 400
-        if not question:
-            return render_template(
-                "index.html", qdrant_ok=True, qdrant_err=None,
-                error="Please enter a question.",
-                question="", top_k=top_k, reindex=reindex,
-            ), 400
+            return render_index(status=400, error="Please choose a PDF.", **common)
+
+        missing = missing_required_inputs(template, structured_inputs)
+        if missing:
+            return render_index(
+                status=400,
+                error=f"Please provide: {', '.join(missing)}.",
+                **common,
+            )
 
         tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
         tmp.close()
@@ -86,27 +133,23 @@ def create_app() -> Flask:
                 result = pipeline.run_query(
                     pdf_path=tmp_path,
                     source_name=upload.filename,
-                    question=question,
+                    task=task,
+                    structured_inputs=structured_inputs,
                     top_k=top_k,
                     reindex=reindex,
                 )
             except pipeline.QdrantUnreachable as e:
-                return render_template(
-                    "index.html", qdrant_ok=False, qdrant_err=str(e),
-                    question=question, top_k=top_k, reindex=reindex,
-                ), 503
+                return render_index(status=503, qdrant_ok=False, qdrant_err=str(e),
+                                    **common)
             except pipeline.PdfHasNoText as e:
-                return render_template(
-                    "index.html", qdrant_ok=True, qdrant_err=None,
-                    error=str(e),
-                    question=question, top_k=top_k, reindex=reindex,
-                ), 422
+                return render_index(status=422, error=str(e), **common)
         finally:
             tmp_path.unlink(missing_ok=True)
 
         return render_template(
             "result.html",
-            question=question,
+            task_label=template.label,
+            request_summary=structured_inputs,
             answer_html=render_markdown(result.answer),
             citations=result.citations,
             ocr_pages=result.ocr_pages,

@@ -1,0 +1,42 @@
+id: draft_correspondence
+label: Draft Correspondence
+version: 1
+
+inputs:
+  - name: recipient
+    type: text
+    required: true
+    label: Recipient
+    placeholder: "e.g. the client, opposing counsel, the property manager"
+  - name: question
+    type: textarea
+    required: true
+    label: What should it say?
+    placeholder: "Describe the purpose and key points, e.g. 'update the client on the defence deadline and request instructions'."
+
+retrieval_query: ""
+top_k: 10
+
+system_prompt: |
+  TASK: Draft a client-ready letter or email body addressed to the recipient
+  named in the request, covering the points the user has described, grounded in
+  this single legal-matter document.
+
+  - Open with an appropriate salutation to the named recipient and close with a
+    neutral sign-off placeholder ("[Your name]"). Do not invent the sender's
+    name, firm, or contact details.
+  - Use a professional, plain-language tone suitable for the recipient.
+  - Where the letter refers to facts of the matter, those facts must come from
+    the retrieved passages and carry an inline citation per the rules above.
+    (Citations are for the lawyer's verification; the lawyer will remove them
+    before the letter is sent.)
+
+  MATTER-ONLY MODE — mandatory:
+  Do not cite, name, or assert any case, statute, regulation, rule, legal test,
+  or the elements of any cause of action from memory or general knowledge. If
+  making a point in the letter would require external legal authority, do not
+  supply it from training knowledge — instead state plainly that the point
+  requires legal authority that has not been retrieved, so the lawyer can
+  supply it.
+
+  Output the letter/email body only, in markdown.

@@ -9,11 +9,14 @@
     h1 { font-size: 20px; margin: 0 0 4px 0; }
     .sub { color: #666; font-size: 13px; margin-bottom: 24px; }
     label { display: block; margin: 14px 0 4px; font-weight: 600; font-size: 13px; }
-    input[type="file"], textarea, input[type="text"], input[type="number"] {
+    input[type="file"], textarea, input[type="text"], input[type="number"], select {
       width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px;
-      font: inherit; box-sizing: border-box;
+      font: inherit; box-sizing: border-box; background: #fff;
     }
     textarea { min-height: 90px; resize: vertical; }
+    .checkboxes { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 4px; }
+    label.inline { display: inline; margin: 0; font-weight: 400; font-size: 14px; }
+    label.inline input { width: auto; margin-right: 4px; }
     button { background: #1f6feb; color: white; border: 0; padding: 10px 18px;
              border-radius: 4px; font-size: 15px; cursor: pointer; margin-top: 14px; }
     button:disabled { background: #999; cursor: progress; }
@@ -54,7 +57,7 @@
 <body>
   <header>
     <h1>Matter Clerk</h1>
-    <div class="sub">Local document-grounded Q&amp;A &middot; Day 2 (single PDF)</div>
+    <div class="sub">Local document-grounded legal tasks &middot; Day 3 (single PDF, matter-only)</div>
   </header>
   {% block content %}{% endblock %}
 </body>

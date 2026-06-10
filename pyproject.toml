@@ -20,6 +20,7 @@ dependencies = [
     "bleach>=6.0",
     "pytesseract>=0.3.10",
     "pdf2image>=1.17.0",
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]

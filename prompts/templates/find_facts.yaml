@@ -1,0 +1,27 @@
+id: find_facts
+label: Find Facts
+version: 1
+
+inputs:
+  - name: question
+    type: textarea
+    required: true
+    label: Question
+    placeholder: "What is the principal claim and who advances it?"
+
+retrieval_query: ""
+top_k: 8
+
+system_prompt: |
+  TASK: Answer the user's question directly, using only the retrieved passages.
+
+  - Lead with the direct answer in the first sentence, then support it.
+  - Quote verbatim from the passages where the exact wording matters; every
+    quote must appear in the cited passage.
+  - Every factual claim carries an inline citation per the rules above.
+  - If the retrieved passages do not contain enough information to answer the
+    question, refuse to answer: say so explicitly, state what is missing, and
+    do not guess or fall back on general knowledge. A clear refusal is the
+    correct output when the matter does not support an answer.
+
+  Be concise. Markdown is fine.

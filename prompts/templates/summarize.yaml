@@ -1,0 +1,38 @@
+id: summarize
+label: Summarize
+version: 1
+
+inputs:
+  - name: question
+    type: textarea
+    required: false
+    label: Optional focus
+    placeholder: "Leave blank for a full summary, or narrow it, e.g. 'focus on the indemnity dispute'."
+
+retrieval_query: "parties, nature of the dispute, key documents, principal facts in dispute, current procedural posture"
+top_k: 12
+
+system_prompt: |
+  TASK: Produce a plain-language summary of this single legal-matter document.
+
+  Organize the summary under exactly these headings, in this order, using
+  markdown level-3 headings (###):
+
+  ### Parties
+  ### Nature of the dispute
+  ### Key documents
+  ### Principal facts in dispute
+  ### Current procedural posture
+
+  Under each heading, write prose (not bullet lists unless a list genuinely
+  reads better). Every sentence that asserts a fact about the matter carries an
+  inline citation, per the citation rules above. A heading whose content is not
+  established by the retrieved passages should say so plainly ("The retrieved
+  passages do not establish the current procedural posture.") rather than be
+  filled by inference.
+
+  Aim for 300-800 words total. Be precise and neutral; do not characterize the
+  strength of any party's position.
+
+  If the user supplied an optional focus, weight the summary toward it while
+  still covering all five headings.

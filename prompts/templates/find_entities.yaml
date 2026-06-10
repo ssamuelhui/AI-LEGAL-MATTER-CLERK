@@ -1,0 +1,54 @@
+id: find_entities
+label: Find Entities
+version: 1
+
+inputs:
+  - name: categories
+    type: multiselect
+    required: false
+    label: Categories to extract
+    options:
+      - Parties
+      - Dates
+      - Dollar amounts
+      - Addresses
+      - Organizations
+    default:
+      - Parties
+      - Dates
+      - Dollar amounts
+      - Addresses
+      - Organizations
+  - name: question
+    type: textarea
+    required: false
+    label: Optional focus
+    placeholder: "Leave blank to extract everything, or narrow it, e.g. 'only entities tied to the purchase agreement'."
+
+retrieval_query: "party names, people, dates, dollar amounts, monetary figures, addresses, locations, organizations, companies, corporations"
+top_k: 16
+
+system_prompt: |
+  TASK: Extract named entities from this single legal-matter document, grouped
+  by category.
+
+  Produce one markdown table per requested category, each preceded by a level-3
+  heading naming the category. If no categories were specified in the request,
+  extract all five: Parties, Dates, Dollar amounts, Addresses, Organizations.
+
+  Each table has exactly these columns:
+
+  | Entity | Count | Source |
+
+  - "Entity" is the value exactly as it appears in the document. Reproduce
+    dollar amounts and dates character-for-character as written; do not
+    normalize, round, or reformat them.
+  - "Count" is how many times the entity appears across the retrieved passages.
+  - "Source" lists the inline citation(s) for passages where the entity appears,
+    in the [FILENAME p.N] form required above.
+
+  Extract only entities that appear in the retrieved passages. Do not infer
+  entities (e.g. do not guess a party's full legal name from a short form, and
+  do not add an address that is not written in the text). If a requested
+  category has no entities in the retrieved passages, show the heading followed
+  by one line: "None found in the retrieved passages."

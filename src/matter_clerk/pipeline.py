@@ -11,7 +11,12 @@ from .citation import Citation
 from .embed import embed, embedding_dimension
 from .ingest import chunk_pages, extract_pdf_pages
 from .llm import LLMClient
-from .prompts import DAY1_SYSTEM_PROMPT, build_user_message
+from .prompts import (
+    build_retrieval_query,
+    build_system_prompt,
+    build_user_message,
+    get_template,
+)
 from .vectorstore import (
     collection_exists,
     connect,
@@ -33,7 +38,12 @@ class PdfHasNoText(RuntimeError):
     """Raised when extraction returns zero pages with text."""
 
 
+class UnknownTask(RuntimeError):
+    """Raised when an unrecognised task id is requested."""
+
+
 class PipelineResult(BaseModel):
+    task: str
     answer: str
     citations: list[Citation]
     ocr_pages: list[int]
@@ -57,18 +67,30 @@ def _precheck_qdrant(client) -> None:
 def run_query(
     pdf_path: Path,
     source_name: str,
-    question: str,
-    top_k: int = 8,
+    task: str,
+    structured_inputs: dict,
+    top_k: int | None = None,
     reindex: bool = False,
     collection: str | None = None,
 ) -> PipelineResult:
-    """Ingest -> retrieve -> answer for one PDF and one question.
+    """Ingest -> retrieve -> answer for one PDF and one task.
 
     Shared by the CLI and the Flask handler. `source_name` is the human-facing
     filename that appears in citations (e.g. "Pleadings_2024-03-15.pdf"); it
     can differ from `pdf_path` because the web handler hands us a temp file but
     we want the upload's original name in the citation.
+
+    `task` selects a TaskTemplate (e.g. "summarize"); `structured_inputs` holds
+    that task's user inputs (e.g. {"question": "..."}). `top_k` overrides the
+    template's per-task default when supplied.
     """
+    try:
+        template = get_template(task)
+    except KeyError:
+        raise UnknownTask(f"Unknown task: {task!r}")
+
+    resolved_top_k = top_k if top_k is not None else template.top_k
+
     host = os.environ.get("QDRANT_HOST", "localhost")
     port = int(os.environ.get("QDRANT_PORT", "6333"))
     embed_model = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
@@ -103,8 +125,9 @@ def run_query(
         log.info(f"Reusing existing collection: {coll}")
 
     log.info("Retrieving relevant chunks ...")
-    query_vec = embed([question], model_name=embed_model)[0]
-    hits = search(client, coll, query_vec, top_k)
+    retrieval_query = build_retrieval_query(template, structured_inputs)
+    query_vec = embed([retrieval_query], model_name=embed_model)[0]
+    hits = search(client, coll, query_vec, resolved_top_k)
     retrieved = [
         {
             "source": h.payload["source"],
@@ -120,8 +143,11 @@ def run_query(
     llm = LLMClient(model=model)
     answer = llm.complete(
         [
-            {"role": "system", "content": DAY1_SYSTEM_PROMPT},
-            {"role": "user", "content": build_user_message(question, retrieved)},
+            {"role": "system", "content": build_system_prompt(template)},
+            {
+                "role": "user",
+                "content": build_user_message(template, structured_inputs, retrieved),
+            },
         ]
     )
 
@@ -145,13 +171,14 @@ def run_query(
         )
 
     return PipelineResult(
+        task=task,
         answer=answer.strip(),
         citations=citations,
         ocr_pages=ocr_pages,
         unreadable_pages=unreadable_pages,
         model=model,
         embed_model=embed_model,
-        top_k=top_k,
+        top_k=resolved_top_k,
         timestamp=dt.datetime.now(dt.timezone.utc).isoformat(),
         pdf_sha256=file_hash(pdf_path),
         collection=coll,

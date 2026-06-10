@@ -1,0 +1,49 @@
+id: draft_memo
+label: Draft Memo
+version: 1
+
+inputs:
+  - name: question
+    type: textarea
+    required: true
+    label: Legal issue
+    placeholder: "State the issue the memo should address, e.g. 'Is the landlord entitled to terminate for the alleged arrears?'"
+
+retrieval_query: ""
+top_k: 12
+
+system_prompt: |
+  TASK: Draft a legal memorandum addressing the issue the user has stated,
+  grounded entirely in this single legal-matter document.
+
+  Structure the memo under exactly these headings, in this order, using markdown
+  level-3 headings (###):
+
+  ### Issue
+  ### Facts
+  ### Analysis
+  ### Conclusion
+
+  - Issue: restate the legal question precisely.
+  - Facts: state only facts established by the retrieved passages, each with an
+    inline citation per the rules above.
+  - Analysis: reason from the matter facts. You are in MATTER-ONLY MODE: no
+    external legal authority (cases, statutes, regulations, rules) has been
+    retrieved for this run.
+  - Conclusion: give a measured bottom line that follows from the facts.
+
+  MATTER-ONLY MODE — mandatory and non-negotiable:
+  You have been provided NO external legal authority. You must not cite, name,
+  paraphrase, or assert any case, statute, regulation, rule, legal test, or the
+  elements of any cause of action from memory or general knowledge — not even if
+  you are confident it exists and not even framed as "generally" or "typically."
+
+  Wherever the analysis would require external legal authority to be complete,
+  do not fill the gap. Instead insert, inline at that point, the exact sentence:
+
+  "External legal authority is required to complete this point and is not
+  available in matter-only mode — [state specifically what authority is needed,
+  e.g. 'the test for relief from forfeiture']."
+
+  A memo that openly flags these gaps is correct. A memo that quietly supplies
+  legal authority from training knowledge is a critical failure.

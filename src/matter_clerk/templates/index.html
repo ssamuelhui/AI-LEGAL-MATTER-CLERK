@@ -12,9 +12,43 @@
   <label for="pdf">PDF</label>
   <input id="pdf" name="pdf" type="file" accept="application/pdf" required>
 
-  <label for="question">Question</label>
-  <textarea id="question" name="question" required
-            placeholder="What is the principal claim and who advances it?">{{ question or "" }}</textarea>
+  <label for="task">Task</label>
+  <select id="task" name="task">
+    {% for t in tasks %}
+    <option value="{{ t.id }}" {% if t.id == selected_task %}selected{% endif %}>{{ t.label }}</option>
+    {% endfor %}
+  </select>
+
+  {% for t in tasks %}
+  <div class="task-fields" data-task="{{ t.id }}"
+       {% if t.id != selected_task %}hidden{% endif %}>
+    {% for f in t.inputs %}
+    <label for="{{ t.id }}_{{ f.name }}">{{ f.label }}</label>
+    {% if f.type == "textarea" %}
+      <textarea id="{{ t.id }}_{{ f.name }}" name="{{ f.name }}"
+                placeholder="{{ f.placeholder or '' }}"
+                {% if f.required %}data-required="1"{% endif %}>{{ values.get(f.name) if t.id == selected_task else '' }}</textarea>
+    {% elif f.type == "text" %}
+      <input id="{{ t.id }}_{{ f.name }}" name="{{ f.name }}" type="text"
+             placeholder="{{ f.placeholder or '' }}"
+             value="{{ values.get(f.name) if t.id == selected_task else '' }}"
+             {% if f.required %}data-required="1"{% endif %}>
+    {% elif f.type == "multiselect" %}
+      <div class="checkboxes">
+        {% for opt in f.options %}
+        <label class="inline">
+          <input type="checkbox" name="{{ f.name }}" value="{{ opt }}"
+                 {% if t.id == selected_task and values.get(f.name) %}
+                   {% if opt in values.get(f.name) %}checked{% endif %}
+                 {% elif opt in (f.default or []) %}checked{% endif %}>
+          {{ opt }}
+        </label>
+        {% endfor %}
+      </div>
+    {% endif %}
+    {% endfor %}
+  </div>
+  {% endfor %}
 
   <details>
     <summary>Advanced</summary>
@@ -22,7 +56,7 @@
       <div>
         <label for="top_k">Top-K</label>
         <input id="top_k" name="top_k" type="number" min="1" max="50"
-               value="{{ top_k or 8 }}">
+               placeholder="task default" value="{{ top_k or '' }}">
       </div>
       <div>
         <label style="font-weight: 400;">
@@ -33,14 +67,35 @@
     </div>
   </details>
 
-  <button type="submit" id="askbtn">Ask</button>
+  <button type="submit" id="askbtn">Run task</button>
 </form>
 <script>
-  document.getElementById("askform").addEventListener("submit", function() {
-    var b = document.getElementById("askbtn");
-    b.disabled = true;
-    b.textContent = "Processing…";
-  });
+  (function () {
+    var select = document.getElementById("task");
+    var groups = document.querySelectorAll(".task-fields");
+
+    function update() {
+      var chosen = select.value;
+      groups.forEach(function (g) {
+        var active = g.getAttribute("data-task") === chosen;
+        g.hidden = !active;
+        g.querySelectorAll("input, textarea").forEach(function (el) {
+          // Disabled controls aren't submitted and skip HTML5 validation.
+          el.disabled = !active;
+          if (el.dataset.required) el.required = active;
+        });
+      });
+    }
+
+    select.addEventListener("change", update);
+    update();
+
+    document.getElementById("askform").addEventListener("submit", function () {
+      var b = document.getElementById("askbtn");
+      b.disabled = true;
+      b.textContent = "Processing…";
+    });
+  })();
 </script>
 {% endif %}
 {% endblock %}
