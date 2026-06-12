@@ -2,16 +2,30 @@
 {% block content %}
 <nav><a href="/">&larr; Run another task</a></nav>
 
+{% if is_pleading %}<div class="banner draft">{{ draft_banner }}</div>{% endif %}
+
 <section class="block">
   <h2>{{ task_label }} &middot; matter-only</h2>
+  {% if party_role %}<div class="question"><strong>Party role:</strong> {{ party_role }}</div>{% endif %}
   {% if request_summary %}
   <div class="question">
     {% for k, v in request_summary.items() %}
-    <div><strong>{{ k }}:</strong> {{ v if v is string else v|join(", ") }}</div>
+    <div><strong>{{ k }}:</strong> {{ v }}</div>
     {% endfor %}
   </div>
   {% endif %}
 </section>
+
+{% for w in pleading_warnings %}
+<div class="banner warn">{{ w }}</div>
+{% endfor %}
+
+{% if is_pleading %}
+<section class="block">
+  <h2>Cover note</h2>
+  <div class="answer cover-note">{{ cover_note_html|safe }}</div>
+</section>
+{% endif %}
 
 {% if ocr_pages %}
 <div class="banner info">
@@ -27,9 +41,11 @@
 {% endif %}
 
 <section class="block">
-  <h2>Answer</h2>
+  <h2>{% if is_pleading %}Pleading draft{% else %}Answer{% endif %}</h2>
   <div class="answer">{{ answer_html|safe }}</div>
 </section>
+
+{% if is_pleading %}<div class="banner draft">{{ draft_banner }}</div>{% endif %}
 
 <section class="block">
   <h2>Citations</h2>

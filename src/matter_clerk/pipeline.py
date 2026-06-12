@@ -7,6 +7,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from . import audit, pleadings
 from .citation import Citation
 from .embed import embed, embedding_dimension
 from .ingest import chunk_pages, extract_pdf_pages
@@ -18,6 +19,7 @@ from .prompts import (
     get_template,
 )
 from .vectorstore import (
+    all_chunks,
     collection_exists,
     connect,
     default_collection_name,
@@ -42,12 +44,22 @@ class UnknownTask(RuntimeError):
     """Raised when an unrecognised task id is requested."""
 
 
+class LimitationReviewRequired(RuntimeError):
+    """Raised before generating a pleading when the limitation check trips and
+    the user has not confirmed a limitation analysis was completed."""
+
+    def __init__(self, signals: list[str]) -> None:
+        super().__init__("Limitation review required before drafting a pleading.")
+        self.signals = signals
+
+
 class PipelineResult(BaseModel):
     task: str
     answer: str
     citations: list[Citation]
     ocr_pages: list[int]
     unreadable_pages: list[int]
+    pleading_warnings: list[str]
     model: str
     embed_model: str
     top_k: int
@@ -139,11 +151,55 @@ def run_query(
     if not retrieved:
         raise PdfHasNoText("No chunks retrieved.")
 
+    pdf_sha256 = file_hash(pdf_path)
+
+    # Pleading-specific safety gates (SoW 4.6.1): run BEFORE the model call so a
+    # tripped limitation check refuses without spending tokens on a draft.
+    pleading_warnings: list[str] = []
+    if template.variants:
+        pleading_type = structured_inputs.get("pleading_type")
+        full_text = all_chunks(client, coll)
+
+        # Scan the whole matter document AND the drafter's typed particulars:
+        # the user's own description of the case is a prime place a limitation
+        # concern (a deadline, a discovery date) gets mentioned.
+        scan_text = full_text + [structured_inputs.get("claim_particulars") or ""]
+        signals = pleadings.scan_for_limitation(scan_text)
+        if signals:
+            confirmed = bool(structured_inputs.get("limitation_confirmed"))
+            audit.log_event(
+                "limitation_review",
+                task=task,
+                pleading_type=pleading_type,
+                source=source_name,
+                pdf_sha256=pdf_sha256,
+                signals=signals,
+                user_confirmed=confirmed,
+                proceeded=confirmed,
+                claim_particulars=(structured_inputs.get("claim_particulars") or "")[
+                    :2000
+                ],
+            )
+            if not confirmed:
+                raise LimitationReviewRequired(signals)
+
+        if pleadings.role_for(pleading_type) == "Defendant" and not (
+            pleadings.has_pleading_hallmarks(full_text)
+        ):
+            pleading_warnings.append(
+                "The uploaded PDF does not contain typical pleading markers. "
+                "You affirmed it is the opposing party's pleading — confirm that "
+                "is correct before relying on this draft."
+            )
+
     log.info("Asking the model ...")
     llm = LLMClient(model=model)
     answer = llm.complete(
         [
-            {"role": "system", "content": build_system_prompt(template)},
+            {
+                "role": "system",
+                "content": build_system_prompt(template, structured_inputs),
+            },
             {
                 "role": "user",
                 "content": build_user_message(template, structured_inputs, retrieved),
@@ -176,11 +232,12 @@ def run_query(
         citations=citations,
         ocr_pages=ocr_pages,
         unreadable_pages=unreadable_pages,
+        pleading_warnings=pleading_warnings,
         model=model,
         embed_model=embed_model,
         top_k=resolved_top_k,
         timestamp=dt.datetime.now(dt.timezone.utc).isoformat(),
-        pdf_sha256=file_hash(pdf_path),
+        pdf_sha256=pdf_sha256,
         collection=coll,
         was_reindexed=needs_index,
     )

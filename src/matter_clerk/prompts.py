@@ -52,6 +52,15 @@ but they never override the five rules above."""
 # --------------------------------------------------------------------------
 # Template model
 # --------------------------------------------------------------------------
+class ShowWhen(BaseModel):
+    """Conditional-visibility rule: show this input only when another input's
+    value is one of `values`. Drives the web form's nested toggling (e.g. show
+    claim_particulars only for plaintiff pleading types)."""
+
+    input: str
+    values: list[str]
+
+
 class InputField(BaseModel):
     """One user-supplied input for a task, declared in the task's YAML.
 
@@ -59,19 +68,24 @@ class InputField(BaseModel):
     (how the value is folded into the request)."""
 
     name: str
-    type: Literal["text", "textarea", "multiselect"]
+    type: Literal["text", "textarea", "multiselect", "select", "checkbox"]
     label: str
     required: bool = False
     placeholder: Optional[str] = None
-    options: Optional[list[str]] = None  # multiselect only
+    options: Optional[list[str]] = None  # select / multiselect
     default: Optional[list[str]] = None  # multiselect only
+    show_when: Optional[ShowWhen] = None
 
 
 class TaskTemplate(BaseModel):
     """A single named task, loaded and validated from prompts/templates/<id>.yaml.
 
     `system_prompt` holds ONLY the task-specific body; the non-removable
-    SAFETY_PREAMBLE is prepended at runtime by `build_system_prompt`."""
+    SAFETY_PREAMBLE is prepended at runtime by `build_system_prompt`.
+
+    `variants` (used by draft_pleading) maps an input value to extra,
+    type-specific prompt text appended after the shared body — one task id,
+    several output structures."""
 
     id: str
     label: str
@@ -80,6 +94,7 @@ class TaskTemplate(BaseModel):
     retrieval_query: str = ""
     top_k: int = 8
     inputs: list[InputField] = []
+    variants: Optional[dict[str, str]] = None
 
 
 # Display / dropdown order. Any template not listed is appended alphabetically.
@@ -90,6 +105,7 @@ TASK_ORDER = [
     "find_entities",
     "draft_memo",
     "draft_correspondence",
+    "draft_pleading",
 ]
 
 # The task selected by default (preserves the pre-Day-3 free-form Q&A behaviour).
@@ -130,6 +146,12 @@ def load_templates() -> dict[str, TaskTemplate]:
 
     if not out:
         raise FileNotFoundError(f"No task templates (*.yaml) found in {d}")
+
+    # Fail loudly if the pleading template drifts from the code-owned canon.
+    if "draft_pleading" in out:
+        from . import pleadings
+
+        pleadings.check_template(out["draft_pleading"])
     return out
 
 
@@ -170,8 +192,21 @@ def missing_required_inputs(
 # --------------------------------------------------------------------------
 # Prompt assembly
 # --------------------------------------------------------------------------
-def build_system_prompt(template: TaskTemplate) -> str:
-    return f"{SAFETY_PREAMBLE}\n\n{template.system_prompt.strip()}"
+def build_system_prompt(
+    template: TaskTemplate, structured_inputs: dict | None = None
+) -> str:
+    parts = [SAFETY_PREAMBLE, template.system_prompt.strip()]
+    if template.variants:
+        si = structured_inputs or {}
+        key = si.get("pleading_type")
+        variant = template.variants.get(key) if key else None
+        if not variant:
+            raise ValueError(
+                f"Task '{template.id}' requires a valid pleading_type "
+                f"(one of {list(template.variants)}); got {key!r}"
+            )
+        parts.append(variant.strip())
+    return "\n\n".join(parts)
 
 
 def build_retrieval_query(template: TaskTemplate, structured_inputs: dict) -> str:

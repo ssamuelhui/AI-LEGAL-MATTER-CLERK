@@ -1,0 +1,155 @@
+id: draft_pleading
+label: Draft Pleading
+version: 1
+
+inputs:
+  - name: pleading_type
+    type: select
+    required: true
+    label: Pleading type
+    options:
+      - "Statement of Claim (Superior Court of Justice)"
+      - "Statement of Defence (Superior Court of Justice)"
+      - "Plaintiff's Claim — Form 7A (Small Claims Court)"
+      - "Defence — Form 9A (Small Claims Court)"
+  - name: claim_particulars
+    type: textarea
+    required: false
+    label: Claim particulars
+    placeholder: "Causes of action being advanced, the relief sought, the parties, and key material facts. (Required for plaintiff pleadings.)"
+    show_when:
+      input: pleading_type
+      values:
+        - "Statement of Claim (Superior Court of Justice)"
+        - "Plaintiff's Claim — Form 7A (Small Claims Court)"
+  - name: opposing_pleading_confirmed
+    type: checkbox
+    required: false
+    label: "I confirm the uploaded PDF is the opposing party's pleading (Statement of Claim or Plaintiff's Claim)."
+    show_when:
+      input: pleading_type
+      values:
+        - "Statement of Defence (Superior Court of Justice)"
+        - "Defence — Form 9A (Small Claims Court)"
+  - name: limitation_confirmed
+    type: checkbox
+    required: false
+    label: "I confirm a limitation analysis has been completed for this matter."
+
+retrieval_query: "parties, material facts, dates, events, causes of action, claims, allegations, relief sought, damages, agreement, breach, notice"
+top_k: 16
+
+system_prompt: |
+  TASK: Draft a first-draft pleading, grounded entirely in the matter
+  document(s) in the CONTEXT section. Apply these pleading rules in addition to
+  the rules above:
+
+  - Plead material facts in short, separately numbered paragraphs (1., 2.,
+    3., ...). Each material fact must be supported by the matter document and
+    carry an inline [FILENAME p.N] citation. (Citations are for the drafting
+    lawyer's verification and will be removed before the pleading is finalized.)
+  - You may NAME a cause of action or a defence, but you must NOT state its
+    legal elements, the governing statutory test, or the supporting authority
+    from memory. Where the elements or legal test are needed to complete a
+    paragraph, do NOT supply them — insert exactly, inline:
+    "[ELEMENTS REQUIRED — lawyer to complete: <name the cause of action / defence
+    and what must be established>; external legal authority is required and is
+    not available in matter-only mode.]"
+  - Where a fact needed for the pleading is not in the matter documents, do NOT
+    invent it. Insert exactly, inline:
+    "[ADDITIONAL MATERIAL REQUIRED — lawyer to complete: <state what fact or
+    document is needed>.]"
+  - Do not compute or assert any limitation period or deadline.
+  - Output ONLY the body of the pleading, in markdown. Do NOT add a title page,
+    a draft notice, a watermark, or a disclaimer — the system adds those around
+    your output.
+
+  Follow the type-specific structure given below.
+
+variants:
+  "Statement of Claim (Superior Court of Justice)": |
+    PLEADING TYPE: Statement of Claim — Ontario Superior Court of Justice.
+    Party role: Plaintiff. Draft from the claim particulars plus the matter
+    documents. Use these headings:
+
+    ### Title of Proceeding
+    Court name; "BETWEEN:"; the plaintiff(s) and defendant(s) as named in the
+    matter documents.
+    ### Claim
+    A numbered list of the relief sought against each defendant, drawn from the
+    claim particulars and the matter facts.
+    ### Material Facts
+    Numbered paragraphs of the material facts relied on, each cited. Order them
+    logically: the parties, the background, the events complained of, the loss.
+    ### Causes of Action
+    For each cause of action raised in the particulars, name it and plead the
+    supporting material facts; use the [ELEMENTS REQUIRED ...] marker wherever
+    its legal elements would be needed.
+    ### Relief Sought
+    Restate the remedies sought.
+
+    Close with "[Date]" and a signature-block placeholder
+    "[Name and address of the lawyer or plaintiff]". Do not use court-form
+    numbers.
+
+  "Statement of Defence (Superior Court of Justice)": |
+    PLEADING TYPE: Statement of Defence — Ontario Superior Court of Justice.
+    Party role: Defendant. You are responding to the opposing party's pleading,
+    which is the uploaded matter document. Use these headings:
+
+    ### Title of Proceeding
+    As in the claim being defended.
+    ### Admissions, Denials, and Lack of Knowledge
+    Work through the allegations in the opposing pleading paragraph by
+    paragraph; for each, state whether the defendant admits, denies, or has no
+    knowledge, grounded in and cited to the matter document. Where the
+    defendant's position on an allegation cannot be determined from the matter
+    documents, use the [ADDITIONAL MATERIAL REQUIRED ...] marker.
+    ### Defendant's Version of Material Facts
+    Numbered, cited paragraphs of any additional material facts. Use the
+    [ADDITIONAL MATERIAL REQUIRED ...] marker for the defendant's own facts that
+    are not present in the uploaded pleading.
+    ### Legal Defences
+    Name any defences apparent from the facts; use the [ELEMENTS REQUIRED ...]
+    marker wherever the legal test or elements would be needed.
+
+    Close with "[Date]" and "[Name and address of the lawyer or defendant]".
+
+  "Plaintiff's Claim — Form 7A (Small Claims Court)": |
+    PLEADING TYPE: Plaintiff's Claim — Ontario Small Claims Court (Form 7A).
+    Party role: Plaintiff. Use plain language suited to the Small Claims Court.
+    Use these headings:
+
+    ### Parties
+    The plaintiff and defendant as named in the matter documents.
+    ### What Happened (Reasons for the Claim)
+    Numbered short paragraphs telling, in plain language, what happened, when,
+    and why the defendant is liable — each cited to the matter documents.
+    ### Amount Claimed
+    The amount of money or the relief claimed, drawn from the matter facts and
+    particulars.
+
+    Name any cause of action in plain language; use the [ELEMENTS REQUIRED ...]
+    marker wherever legal elements would be needed. Close with "[Date]" and
+    "[Plaintiff's name and address]".
+
+  "Defence — Form 9A (Small Claims Court)": |
+    PLEADING TYPE: Defence — Ontario Small Claims Court (Form 9A). Party role:
+    Defendant. You are responding to the Plaintiff's Claim, which is the
+    uploaded matter document. Use plain language and these headings:
+
+    ### Parties
+    As in the claim.
+    ### What Parts of the Claim You Dispute
+    For each numbered reason in the Plaintiff's Claim, state in plain language
+    whether the defendant agrees, disagrees, or does not know — grounded in and
+    cited to the matter document. Use the [ADDITIONAL MATERIAL REQUIRED ...]
+    marker where the defendant's position cannot be determined.
+    ### The Defendant's Side of the Story
+    Plain-language, numbered, cited paragraphs of the defendant's account. Use
+    the [ADDITIONAL MATERIAL REQUIRED ...] marker for facts not in the uploaded
+    claim.
+
+    Name any defence in plain language; use the [ELEMENTS REQUIRED ...] marker
+    wherever legal elements would be needed. Close with "[Date]" and
+    "[Defendant's name and address]".

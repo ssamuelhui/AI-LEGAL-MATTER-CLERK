@@ -8,6 +8,18 @@
 </div>
 {% else %}
 {% if error %}<div class="banner error">{{ error }}</div>{% endif %}
+{% if limitation_signals %}
+<div class="banner warn">
+  <strong>Limitation analysis required.</strong> A potential limitation-period
+  issue was detected in this matter, so the pleading was not drafted. Review
+  whether any limitation period applies, then tick
+  <em>&ldquo;I confirm a limitation analysis has been completed&rdquo;</em>
+  below and run the task again.
+  <ul style="margin:8px 0 0 0;">
+    {% for s in limitation_signals %}<li>{{ s }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
 <form method="post" action="/ask" enctype="multipart/form-data" id="askform">
   <label for="pdf">PDF</label>
   <input id="pdf" name="pdf" type="file" accept="application/pdf" required>
@@ -23,32 +35,71 @@
   <div class="task-fields" data-task="{{ t.id }}"
        {% if t.id != selected_task %}hidden{% endif %}>
     {% for f in t.inputs %}
-    <label for="{{ t.id }}_{{ f.name }}">{{ f.label }}</label>
-    {% if f.type == "textarea" %}
-      <textarea id="{{ t.id }}_{{ f.name }}" name="{{ f.name }}"
-                placeholder="{{ f.placeholder or '' }}"
-                {% if f.required %}data-required="1"{% endif %}>{{ values.get(f.name) if t.id == selected_task else '' }}</textarea>
-    {% elif f.type == "text" %}
-      <input id="{{ t.id }}_{{ f.name }}" name="{{ f.name }}" type="text"
-             placeholder="{{ f.placeholder or '' }}"
-             value="{{ values.get(f.name) if t.id == selected_task else '' }}"
-             {% if f.required %}data-required="1"{% endif %}>
-    {% elif f.type == "multiselect" %}
-      <div class="checkboxes">
-        {% for opt in f.options %}
+    {% set is_active = (t.id == selected_task) %}
+    {# limitation_confirmed is NOT a standing field: it is rendered only on a #}
+    {# refusal re-render (below, gated on limitation_signals). See ARCHITECTURE #}
+    {# .md "Day 3.5: limitation checkbox (fix B)". #}
+    {% if f.name != 'limitation_confirmed' %}
+    <div class="field"
+         {% if f.show_when %}data-show-when-input="{{ f.show_when.input }}"
+         data-show-when-values='{{ f.show_when.values|tojson }}'{% endif %}>
+      {% if f.type == "checkbox" %}
         <label class="inline">
-          <input type="checkbox" name="{{ f.name }}" value="{{ opt }}"
-                 {% if t.id == selected_task and values.get(f.name) %}
-                   {% if opt in values.get(f.name) %}checked{% endif %}
-                 {% elif opt in (f.default or []) %}checked{% endif %}>
-          {{ opt }}
+          <input type="checkbox" name="{{ f.name }}" value="yes"
+                 {% if is_active and values.get(f.name) %}checked{% endif %}>
+          {{ f.label }}
         </label>
-        {% endfor %}
-      </div>
+      {% else %}
+        <label for="{{ t.id }}_{{ f.name }}">{{ f.label }}</label>
+        {% if f.type == "textarea" %}
+          <textarea id="{{ t.id }}_{{ f.name }}" name="{{ f.name }}"
+                    placeholder="{{ f.placeholder or '' }}"
+                    {% if f.required %}data-required="1"{% endif %}>{{ values.get(f.name) if is_active else '' }}</textarea>
+        {% elif f.type == "text" %}
+          <input id="{{ t.id }}_{{ f.name }}" name="{{ f.name }}" type="text"
+                 placeholder="{{ f.placeholder or '' }}"
+                 value="{{ values.get(f.name) if is_active else '' }}"
+                 {% if f.required %}data-required="1"{% endif %}>
+        {% elif f.type == "select" %}
+          <select id="{{ t.id }}_{{ f.name }}" name="{{ f.name }}"
+                  {% if f.required %}data-required="1"{% endif %}>
+            {% for opt in f.options %}
+            <option value="{{ opt }}"
+              {% if (is_active and values.get(f.name) == opt) or (not (is_active and values.get(f.name)) and loop.first) %}selected{% endif %}>{{ opt }}</option>
+            {% endfor %}
+          </select>
+        {% elif f.type == "multiselect" %}
+          <div class="checkboxes">
+            {% for opt in f.options %}
+            <label class="inline">
+              <input type="checkbox" name="{{ f.name }}" value="{{ opt }}"
+                     {% if is_active and values.get(f.name) %}
+                       {% if opt in values.get(f.name) %}checked{% endif %}
+                     {% elif opt in (f.default or []) %}checked{% endif %}>
+              {{ opt }}
+            </label>
+            {% endfor %}
+          </div>
+        {% endif %}
+      {% endif %}
+    </div>
     {% endif %}
     {% endfor %}
   </div>
   {% endfor %}
+
+  {# Limitation confirmation appears ONLY after the gate has tripped, and the #}
+  {# banner above names the specific signals so the lawyer can do the real #}
+  {# analysis before affirming it. #}
+  {% if limitation_signals %}
+  <div class="field limitation-confirm">
+    <label class="inline">
+      <input type="checkbox" name="limitation_confirmed" value="yes">
+      I confirm a limitation analysis has been completed for this matter,
+      addressing the issue(s) flagged above.
+    </label>
+  </div>
+  {% endif %}
 
   <details>
     <summary>Advanced</summary>
@@ -71,23 +122,46 @@
 </form>
 <script>
   (function () {
-    var select = document.getElementById("task");
+    var taskSelect = document.getElementById("task");
     var groups = document.querySelectorAll(".task-fields");
 
-    function update() {
-      var chosen = select.value;
-      groups.forEach(function (g) {
-        var active = g.getAttribute("data-task") === chosen;
-        g.hidden = !active;
-        g.querySelectorAll("input, textarea").forEach(function (el) {
-          // Disabled controls aren't submitted and skip HTML5 validation.
-          el.disabled = !active;
-          if (el.dataset.required) el.required = active;
-        });
+    function setControls(container, on) {
+      // Disabled controls are not submitted and skip HTML5 validation.
+      container.querySelectorAll("input, textarea, select").forEach(function (el) {
+        el.disabled = !on;
+        if (el.dataset.required) el.required = on;
       });
     }
 
-    select.addEventListener("change", update);
+    function updateConditionals(group) {
+      group.querySelectorAll(".field[data-show-when-input]").forEach(function (field) {
+        var ctrl = group.querySelector(
+          "[name='" + field.dataset.showWhenInput + "']"
+        );
+        var allowed = JSON.parse(field.dataset.showWhenValues);
+        var show = ctrl && allowed.indexOf(ctrl.value) !== -1;
+        field.hidden = !show;
+        setControls(field, show);
+      });
+    }
+
+    function update() {
+      var chosen = taskSelect.value;
+      groups.forEach(function (g) {
+        var active = g.getAttribute("data-task") === chosen;
+        g.hidden = !active;
+        setControls(g, active);
+        if (active) updateConditionals(g);
+      });
+    }
+
+    taskSelect.addEventListener("change", update);
+    // Re-evaluate conditional fields when a controlling select changes.
+    groups.forEach(function (g) {
+      g.querySelectorAll("select").forEach(function (s) {
+        s.addEventListener("change", function () { updateConditionals(g); });
+      });
+    });
     update();
 
     document.getElementById("askform").addEventListener("submit", function () {

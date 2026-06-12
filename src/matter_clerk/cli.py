@@ -7,7 +7,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from . import pipeline
+from . import pipeline, pleadings
 from .prompts import DEFAULT_TASK, missing_required_inputs, ordered_templates
 
 log = logging.getLogger("matter_clerk")
@@ -46,6 +46,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Task input for find_entities: comma-separated category list.",
     )
     p.add_argument(
+        "--pleading-type",
+        type=str,
+        default=None,
+        choices=list(pleadings.PLEADING_TYPE_BY_CODE),
+        help="Task input for draft_pleading: which of the four pleading types.",
+    )
+    p.add_argument(
+        "--claim-particulars",
+        type=str,
+        default=None,
+        help="Task input for draft_pleading (plaintiff): causes of action and relief.",
+    )
+    p.add_argument(
+        "--opposing-pleading-confirmed",
+        action="store_true",
+        help="draft_pleading (defendant): affirm the uploaded PDF is the opposing pleading.",
+    )
+    p.add_argument(
+        "--limitation-confirmed",
+        action="store_true",
+        help="draft_pleading: affirm a limitation analysis has been completed.",
+    )
+    p.add_argument(
         "--top-k",
         type=int,
         default=None,
@@ -77,6 +100,14 @@ def _collect_inputs(args: argparse.Namespace) -> dict:
         inputs["categories"] = [
             c.strip() for c in args.categories.split(",") if c.strip()
         ]
+    if args.pleading_type:
+        inputs["pleading_type"] = pleadings.PLEADING_TYPE_BY_CODE[args.pleading_type]
+    if args.claim_particulars:
+        inputs["claim_particulars"] = args.claim_particulars
+    if args.opposing_pleading_confirmed:
+        inputs["opposing_pleading_confirmed"] = True
+    if args.limitation_confirmed:
+        inputs["limitation_confirmed"] = True
     return inputs
 
 
@@ -97,8 +128,13 @@ def main(argv: list[str] | None = None) -> int:
     if missing:
         sys.exit(
             f"ERROR: task '{args.task}' requires: {', '.join(missing)}. "
-            "Supply via --question / --recipient."
+            "See `matter-clerk --help` for the matching flags."
         )
+
+    if args.task == "draft_pleading":
+        pleading_errors = pleadings.validate_pleading_inputs(structured_inputs)
+        if pleading_errors:
+            sys.exit("ERROR: " + " ".join(pleading_errors))
 
     try:
         result = pipeline.run_query(
@@ -116,6 +152,16 @@ def main(argv: list[str] | None = None) -> int:
         )
     except pipeline.PdfHasNoText as e:
         sys.exit(f"ERROR: {e}")
+    except pipeline.LimitationReviewRequired as e:
+        msg = ["LIMITATION ANALYSIS REQUIRED — pleading not drafted.", ""]
+        msg.append("A potential limitation-period issue was detected:")
+        msg.extend(f"  - {s}" for s in e.signals)
+        msg.append("")
+        msg.append(
+            "Review whether any limitation period applies, then re-run with "
+            "--limitation-confirmed to proceed."
+        )
+        sys.exit("\n".join(msg))
 
     if result.ocr_pages:
         log.info(
@@ -127,10 +173,24 @@ def main(argv: list[str] | None = None) -> int:
             f"(no extractable text and not blank): {result.unreadable_pages}"
         )
 
-    print(f"[TASK] {template.label} (matter-only)")
-    print()
-    print("[ANSWER]")
-    print(result.answer)
+    for w in result.pleading_warnings:
+        log.warning(f"WARN: {w}")
+
+    if args.task == "draft_pleading":
+        print(pleadings.DRAFT_BANNER)
+        print()
+        print("[COVER NOTE]")
+        print(pleadings.COVER_NOTE)
+        print()
+        print(f"[PLEADING DRAFT] {template.label} (matter-only)")
+        print(result.answer)
+        print()
+        print(pleadings.DRAFT_BANNER)
+    else:
+        print(f"[TASK] {template.label} (matter-only)")
+        print()
+        print("[ANSWER]")
+        print(result.answer)
     print()
     print("[CITATIONS]")
     for cit in result.citations:

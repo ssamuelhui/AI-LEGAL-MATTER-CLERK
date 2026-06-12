@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from flask import Flask, render_template, request
 from werkzeug.serving import make_server
 
-from . import pipeline
+from . import pipeline, pleadings
 from .prompts import (
     DEFAULT_TASK,
     get_template,
@@ -59,11 +59,28 @@ def _collect_web_inputs(template, form) -> dict:
             vals = form.getlist(field.name)
             if vals:
                 inputs[field.name] = vals
+        elif field.type == "checkbox":
+            if form.get(field.name):
+                inputs[field.name] = True
         else:
             val = (form.get(field.name) or "").strip()
             if val:
                 inputs[field.name] = val
     return inputs
+
+
+def _display_inputs(template, structured_inputs: dict) -> dict:
+    """Map raw input names/values to friendly labels/strings for the result page."""
+    label_by_name = {f.name: f.label for f in template.inputs}
+    out: dict = {}
+    for name, val in structured_inputs.items():
+        key = label_by_name.get(name, name)
+        if isinstance(val, bool):
+            val = "Yes" if val else "No"
+        elif isinstance(val, list):
+            val = ", ".join(val)
+        out[key] = val
+    return out
 
 
 def create_app() -> Flask:
@@ -79,6 +96,7 @@ def create_app() -> Flask:
             values={},
             top_k="",
             reindex=False,
+            limitation_signals=None,
         )
         defaults.update(kw)
         return render_template("index.html", **defaults), status
@@ -124,6 +142,13 @@ def create_app() -> Flask:
                 **common,
             )
 
+        if task == "draft_pleading":
+            pleading_errors = pleadings.validate_pleading_inputs(structured_inputs)
+            if pleading_errors:
+                return render_index(
+                    status=400, error=" ".join(pleading_errors), **common
+                )
+
         tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
         tmp.close()
         tmp_path = Path(tmp.name)
@@ -143,13 +168,27 @@ def create_app() -> Flask:
                                     **common)
             except pipeline.PdfHasNoText as e:
                 return render_index(status=422, error=str(e), **common)
+            except pipeline.LimitationReviewRequired as e:
+                return render_index(status=200, limitation_signals=e.signals, **common)
         finally:
             tmp_path.unlink(missing_ok=True)
 
+        is_pleading = task == "draft_pleading"
         return render_template(
             "result.html",
             task_label=template.label,
-            request_summary=structured_inputs,
+            party_role=(
+                pleadings.role_for(structured_inputs.get("pleading_type"))
+                if is_pleading
+                else None
+            ),
+            request_summary=_display_inputs(template, structured_inputs),
+            is_pleading=is_pleading,
+            draft_banner=pleadings.DRAFT_BANNER if is_pleading else None,
+            cover_note_html=(
+                render_markdown(pleadings.COVER_NOTE) if is_pleading else None
+            ),
+            pleading_warnings=result.pleading_warnings,
             answer_html=render_markdown(result.answer),
             citations=result.citations,
             ocr_pages=result.ocr_pages,
