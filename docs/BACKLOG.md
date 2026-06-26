@@ -16,6 +16,22 @@ The point of this file is to record decisions we *consciously* punted on, so the
 
 ---
 
+## CLI matter query subcommand
+**Deferred from:** Phase 1 Day 4b (June 25, 2026)
+**Trigger to revisit:** When matter work needs to be scriptable/automatable from the terminal (batch runs, CI-style regression over a matter, or a user who prefers the CLI for matters) — or whenever the next CLI pass touches `_matter_main`.
+
+**Context:** Day-4b added cross-document scatter-gather retrieval (`pipeline.run_matter_query`), but only the web UI dispatches to it. The CLI's `matter` subcommand is management-only (`create | list | add | show`); there is no way to *run a task across a matter* from the terminal, so scatter-gather is **web-only** today. The CLI's flat query path (`matter-clerk --pdf <file> --task <task>`) remains single-file/ad-hoc. This was deliberate: the Day-4b scope was the web experience, and the CLI is drifting toward scripting-only for matters. No safety gap — the limitation gate and citation discipline live in the pipeline, so any future CLI verb inherits them for free.
+
+**Scope when revisited:**
+- A `matter-clerk matter query <name> --task <task> [--file <id>] [--top-k N] [task inputs...]` verb that resolves the matter by name, collects the matter's ingested files, and calls `run_matter_query` (or `run_query` when `--file` restricts to one) — mirroring the web dispatch.
+- Render the answer + citations + the "Drew on" file list to the terminal (the web result page's provenance line has a natural CLI equivalent).
+- Pleading inputs (`pleading_type`, `claim_particulars`, the limitation confirmation) need a CLI surface; the limitation refusal must print the per-file `signals_by_file` and exit non-zero until confirmed.
+- Fire the same `matter_query` / `limitation_review` audit events the web path does.
+
+**Note:** Low risk (the pipeline already does the work), but non-trivial surface area for pleading inputs and the limitation-confirmation round-trip — budget for that, not just the happy path.
+
+---
+
 ## OCR improvements: layout-aware extraction (tables, forms, columns, sidebars)
 **Deferred from:** Phase 1 Day 2.5 (June 5, 2026)
 **Trigger to revisit:** After 2–3 weeks of real-world tool use, once the user has a representative sample of documents that have failed OCR in practice — OR before Phase 2 CanLII verification work begins, whichever comes first.

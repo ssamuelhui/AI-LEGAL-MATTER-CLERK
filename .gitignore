@@ -20,6 +20,12 @@ build/
 # Vector DB persistent storage
 qdrant_storage/
 
+# Matter persistence (contains confidential matter data; never commit)
+matter_clerk.db
+*.db
+*.db-journal
+*.db-wal
+
 # Logs
 *.log
 logs/

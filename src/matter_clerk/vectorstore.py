@@ -1,12 +1,31 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from pathlib import Path
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
 from .ingest import Chunk
+
+
+@dataclass
+class ScoredChunk:
+    """One retrieved chunk plus the collection it came from.
+
+    Scatter-gather (Day 4b) merges hits from several per-file collections, so a
+    hit must remember its origin collection — that's how the caller maps it back
+    to a matter file_id (for the audit log and the "Drew on" label). `source` is
+    the human filename from the payload and is what already drives citations;
+    `collection` is the machine identity. Single-collection search does not need
+    this and keeps returning raw Qdrant points."""
+
+    collection: str
+    score: float
+    source: str
+    locator: str
+    text: str
 
 
 def file_hash(path: Path) -> str:
@@ -48,7 +67,7 @@ def upsert_chunks(
         PointStruct(
             id=i,
             vector=vec,
-            payload={"source": c.source, "page": c.page, "text": c.text},
+            payload={"source": c.source, "locator": c.locator, "text": c.text},
         )
         for i, (c, vec) in enumerate(zip(chunks, vectors))
     ]
@@ -60,6 +79,44 @@ def search(client: QdrantClient, name: str, query_vec: list[float], top_k: int):
         collection_name=name, query=query_vec, limit=top_k, with_payload=True
     )
     return result.points
+
+
+def search_across_collections(
+    client: QdrantClient,
+    collections: list[str],
+    query_vec: list[float],
+    top_k: int,
+) -> list[ScoredChunk]:
+    """Scatter-gather retrieval across several collections (Day 4b).
+
+    Retrieves `top_k` from EACH collection independently, then merges by
+    similarity score (descending) and returns the global `top_k`. Fetching
+    `top_k` per collection is lossless for the global top-k: a chunk in the
+    global top-k is necessarily in its own collection's top-k, so no candidate
+    that belongs in the final set is missed. Scores are comparable across
+    collections because every collection shares the embed model and cosine
+    distance. The final list is truncated to `top_k` so the context handed to
+    the model is the same size as a single-file query, regardless of how many
+    files the matter holds.
+
+    `collections` should be the (already-ingested) per-file collections of the
+    matter. An empty list yields an empty result."""
+    merged: list[ScoredChunk] = []
+    for name in collections:
+        for p in client.query_points(
+            collection_name=name, query=query_vec, limit=top_k, with_payload=True
+        ).points:
+            merged.append(
+                ScoredChunk(
+                    collection=name,
+                    score=p.score,
+                    source=p.payload["source"],
+                    locator=p.payload["locator"],
+                    text=p.payload["text"],
+                )
+            )
+    merged.sort(key=lambda c: c.score, reverse=True)
+    return merged[:top_k]
 
 
 def all_chunks(client: QdrantClient, name: str, batch: int = 256) -> list[str]:

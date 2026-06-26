@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-from . import pipeline, pleadings
+from . import matters, pipeline, pleadings
 from .prompts import DEFAULT_TASK, missing_required_inputs, ordered_templates
+from .vectorstore import file_hash
 
 log = logging.getLogger("matter_clerk")
 
@@ -19,7 +21,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="matter-clerk",
         description="One PDF + one task -> cited output (matter-only).",
     )
-    p.add_argument("--pdf", type=Path, required=True, help="Path to a PDF.")
+    p.add_argument(
+        "--pdf", type=Path, required=True, help="Path to a PDF or .eml file."
+    )
     p.add_argument(
         "--task",
         type=str,
@@ -111,13 +115,151 @@ def _collect_inputs(args: argparse.Namespace) -> dict:
     return inputs
 
 
+# --------------------------------------------------------------------------
+# `matter-clerk matter <verb>` — matter management (Day 4a).
+#
+# Structurally separate from the flat `--pdf/--task` CLI: main() routes here
+# before the flat parser runs, so the existing single-file workflow is wholly
+# unaffected. Shares the ingest primitive (`pipeline.ingest_file`) with the web
+# upload path, so the two cannot drift.
+# --------------------------------------------------------------------------
+def _add_file_to_matter(conn, matter: matters.Matter, file_path: Path) -> matters.MatterFile:
+    """Copy `file_path` into the matter store, ingest it, and record the result.
+
+    Order matters: insert the manifest row FIRST (so a duplicate is rejected by
+    content hash before any copy/ingest work), then copy, then ingest. A failed
+    ingest leaves a 'failed' row with the error rather than a silent gap.
+    """
+    if not file_path.is_file():
+        raise matters.MatterError(f"file not found: {file_path}")
+    suffix = file_path.suffix.lower()
+    if suffix not in (".pdf", ".eml"):
+        raise matters.MatterError(
+            f"unsupported file type: {suffix} (use .pdf or .eml)"
+        )
+
+    sha = file_hash(file_path)
+    file_type = "eml" if suffix == ".eml" else "pdf"
+    coll = matters.collection_name(matter.id, sha)
+    stored = matters.stored_path_for(matter.id, sha, suffix)
+
+    # Raises DuplicateFileInMatter (specific message) if this content is already
+    # in the matter — before we copy or ingest anything.
+    row = matters.add_file_pending(
+        conn, matter.id, file_path.name, file_type, sha, coll, str(stored)
+    )
+
+    stored.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(file_path, stored)
+    try:
+        pipeline.ingest_file(stored, file_path.name, collection=coll)
+        matters.mark_file_ingested(conn, row.id)
+    except Exception as e:
+        matters.mark_file_failed(conn, row.id, str(e))
+        raise matters.MatterError(f"ingest failed for {file_path.name}: {e}")
+    return matters.get_file(conn, row.id)
+
+
+def _matter_main(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(
+        prog="matter-clerk matter",
+        description="Manage matters (Day 4a: create, list, add files, show).",
+    )
+    sub = p.add_subparsers(dest="verb", required=True)
+
+    pc = sub.add_parser("create", help="Create a new matter.")
+    pc.add_argument("name", help="Matter name (must be unique).")
+    pc.add_argument("--description", default=None, help="Optional description.")
+
+    sub.add_parser("list", help="List all matters, most recently active first.")
+
+    pa = sub.add_parser("add", help="Ingest a PDF or .eml file into a matter.")
+    pa.add_argument("name", help="Target matter name.")
+    pa.add_argument("file", type=Path, help="Path to a .pdf or .eml file.")
+
+    ps = sub.add_parser("show", help="Show a matter's metadata and its files.")
+    ps.add_argument("name", help="Matter name.")
+
+    args = p.parse_args(argv)
+
+    conn = matters.connect()
+    try:
+        if args.verb == "create":
+            m = matters.create_matter(conn, args.name, args.description)
+            print(f"Created matter #{m.id}: {m.name}")
+            if m.description:
+                print(f"  {m.description}")
+
+        elif args.verb == "list":
+            ms = matters.list_matters(conn)
+            if not ms:
+                print("No matters yet. Create one with: "
+                      "matter-clerk matter create <name>")
+                return 0
+            for m in ms:
+                last = m.last_queried_at or "never queried"
+                print(
+                    f"#{m.id}  {m.name}  "
+                    f"({m.file_count} file(s), last queried: {last})"
+                )
+
+        elif args.verb == "add":
+            m = matters.get_matter_by_name(conn, args.name)
+            if m is None:
+                sys.exit(
+                    f"ERROR: no matter named {args.name!r}. "
+                    f"Create it with: matter-clerk matter create {args.name!r}"
+                )
+            f = _add_file_to_matter(conn, m, args.file)
+            print(
+                f"Added {f.filename} to matter {m.name!r} "
+                f"(status: {f.ingest_status}, collection: {f.collection})"
+            )
+
+        elif args.verb == "show":
+            m = matters.get_matter_by_name(conn, args.name)
+            if m is None:
+                sys.exit(f"ERROR: no matter named {args.name!r}.")
+            print(f"Matter #{m.id}: {m.name}")
+            if m.description:
+                print(f"  {m.description}")
+            print(f"  created: {m.created_at}")
+            print(f"  last queried: {m.last_queried_at or 'never'}")
+            files = matters.list_files(conn, m.id)
+            if not files:
+                print("  (no files yet - add one with: "
+                      f"matter-clerk matter add {m.name!r} <file>)")
+            else:
+                print(f"  {len(files)} file(s):")
+                for f in files:
+                    ingested = f.ingested_at or "-"
+                    line = (f"    [{f.id}] {f.filename}  ({f.file_type}, "
+                            f"{f.ingest_status}, ingested: {ingested})")
+                    if f.ingest_status == "failed" and f.ingest_error:
+                        line += f"\n        error: {f.ingest_error}"
+                    print(line)
+    except matters.MatterError as e:
+        sys.exit(f"ERROR: {e}")
+    finally:
+        conn.close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     load_dotenv()
+
+    raw = sys.argv[1:] if argv is None else argv
+    if raw and raw[0] == "matter":
+        return _matter_main(raw[1:])
+
     args = parse_args(argv)
 
     if not args.pdf.is_file():
-        sys.exit(f"ERROR: PDF not found: {args.pdf}")
+        sys.exit(f"ERROR: file not found: {args.pdf}")
+
+    if args.pdf.suffix.lower() not in (".pdf", ".eml"):
+        sys.exit(f"ERROR: unsupported file type: {args.pdf.suffix} (use .pdf or .eml)")
 
     template = pipeline.get_template(args.task)
     structured_inputs = _collect_inputs(args)
@@ -171,6 +313,27 @@ def main(argv: list[str] | None = None) -> int:
         log.warning(
             f"WARN: {len(result.unreadable_pages)} page(s) unreadable after OCR "
             f"(no extractable text and not blank): {result.unreadable_pages}"
+        )
+
+    if result.email_metadata:
+        m = result.email_metadata
+        print("[EMAIL]")
+        print(f"from: {m.sender_name}" + (f" <{m.sender_email}>" if m.sender_email else ""))
+        if m.to:
+            print(f"to: {m.to}")
+        if m.cc:
+            print(f"cc: {m.cc}")
+        print(f"date: {m.date_iso or '(unknown)'}")
+        if m.subject:
+            print(f"subject: {m.subject}")
+        if m.message_id:
+            print(f"message-id: {m.message_id}")
+        print()
+
+    if result.attachment_warnings:
+        log.warning(
+            f"WARN: {len(result.attachment_warnings)} attachment(s) detected and "
+            f"NOT processed (body only was indexed): {result.attachment_warnings}"
         )
 
     for w in result.pleading_warnings:

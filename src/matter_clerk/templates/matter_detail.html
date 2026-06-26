@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block content %}
+<nav><a href="{{ url_for('index') }}">&larr; All matters</a></nav>
+
+<section class="block">
+  <h2>{{ matter.name }}</h2>
+  {% if matter.description %}<div class="question">{{ matter.description }}</div>{% endif %}
+  <div class="metadata">created: {{ matter.created_at }}
+last queried: {{ matter.last_queried_at or "never" }}</div>
+</section>
+
+{% if not qdrant_ok %}
+<div class="banner error">
+  <strong>Qdrant is not reachable.</strong> Start it with
+  <code>docker compose up -d</code> to add or query files.
+  {% if qdrant_err %}<div style="margin-top:6px;font-size:12px;">({{ qdrant_err }})</div>{% endif %}
+</div>
+{% endif %}
+{% for cat, msg in get_flashed_messages(with_categories=true) %}
+<div class="banner {{ 'info' if cat == 'ok' else cat }}">{{ msg }}</div>
+{% endfor %}
+{% if error %}<div class="banner error">{{ error }}</div>{% endif %}
+
+<section class="block">
+  <h2>Files</h2>
+  {% if files %}
+  <table class="file-table">
+    <thead><tr><th>File</th><th>Type</th><th>Status</th><th>Ingested</th></tr></thead>
+    <tbody>
+      {% for f in files %}
+      <tr>
+        <td>{{ f.filename }}</td>
+        <td>{{ f.file_type }}</td>
+        <td class="status-{{ f.ingest_status }}">{{ f.ingest_status }}{% if f.ingest_status == 'failed' and f.ingest_error %}<div class="meta">{{ f.ingest_error }}</div>{% endif %}</td>
+        <td>{{ f.ingested_at[:10] if f.ingested_at else "-" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="sub">No files yet. Add one or more below.</p>
+  {% endif %}
+</section>
+
+<section class="block">
+  <h2>Add files</h2>
+  <form method="post" action="{{ url_for('matter_upload', matter_id=matter.id) }}"
+        enctype="multipart/form-data" id="uploadform">
+    <label for="files">PDF or email (.eml) &mdash; select one or more</label>
+    <input id="files" name="files" type="file" multiple
+           accept="application/pdf,.pdf,message/rfc822,.eml" required>
+    <button type="submit" id="uploadbtn">Add files</button>
+  </form>
+  <script>
+    document.getElementById("uploadform").addEventListener("submit", function () {
+      var b = document.getElementById("uploadbtn");
+      b.disabled = true;
+      b.textContent = "Ingesting…";
+    });
+  </script>
+</section>
+
+<section class="block">
+  <h2>Run a task</h2>
+  {% if queryable_files %}
+  {% include "_task_form.html" %}
+  {% else %}
+  <p class="sub">Add and successfully ingest at least one file before running a task.</p>
+  {% endif %}
+</section>
+
+<style>
+  .file-table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  .file-table th, .file-table td { border: 1px solid #eee; padding: 6px 10px;
+                                   text-align: left; vertical-align: top; }
+  .file-table th { background: #f6f6f6; font-size: 12px; text-transform: uppercase;
+                   letter-spacing: .05em; color: #666; }
+  .file-table .meta { color: #8a1f1f; font-size: 12px; margin-top: 2px; }
+  .status-ingested { color: #1a6b2f; }
+  .status-failed { color: #8a1f1f; }
+  .status-pending { color: #6a4a00; }
+</style>
+{% endblock %}

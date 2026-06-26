@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-<nav><a href="/">&larr; Run another task</a></nav>
+<nav><a href="{{ back_url or '/' }}">&larr; {{ back_label or 'Run another task' }}</a></nav>
 
 {% if is_pleading %}<div class="banner draft">{{ draft_banner }}</div>{% endif %}
 
@@ -15,6 +15,31 @@
   </div>
   {% endif %}
 </section>
+
+{% if email_metadata %}
+<section class="block">
+  <h2>Email &middot; uploaded message</h2>
+  <div class="question">
+    <div><strong>From:</strong> {{ email_metadata.sender_name }}{% if email_metadata.sender_email and email_metadata.sender_email != email_metadata.sender_name %} &lt;{{ email_metadata.sender_email }}&gt;{% endif %}</div>
+    {% if email_metadata.to %}<div><strong>To:</strong> {{ email_metadata.to }}</div>{% endif %}
+    {% if email_metadata.cc %}<div><strong>Cc:</strong> {{ email_metadata.cc }}</div>{% endif %}
+    <div><strong>Date:</strong> {{ email_metadata.date_iso or "(unknown)" }}</div>
+    {% if email_metadata.subject %}<div><strong>Subject:</strong> {{ email_metadata.subject }}</div>{% endif %}
+    {% if email_metadata.message_id %}<div><strong>Message-ID:</strong> {{ email_metadata.message_id }}</div>{% endif %}
+  </div>
+</section>
+{% endif %}
+
+{% if attachment_warnings %}
+<div class="banner warn">
+  <strong>{{ attachment_warnings|length }} attachment(s) detected and NOT
+  processed.</strong> Attachment contents are out of scope for this build; only
+  the email body was indexed. Filenames:
+  <ul style="margin:8px 0 0 0;">
+    {% for name in attachment_warnings %}<li>{{ name }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
 
 {% for w in pleading_warnings %}
 <div class="banner warn">{{ w }}</div>
@@ -49,6 +74,12 @@
 
 <section class="block">
   <h2>Citations</h2>
+  {% if cross_document and retrieved_sources %}
+  {# Honest provenance: which matter files actually grounded this answer.       #}
+  {# Subdued, plain text — a transparency note, not a banner. Matter mode only. #}
+  <div style="color:#555;font-size:13px;margin:0 0 10px 0;">Drew on:
+    {{ retrieved_sources|join(", ") }}</div>
+  {% endif %}
   <ul class="citations">
     {% for c in citations %}
     <li>[{{ c.source }} {{ c.page_or_paragraph }}] &nbsp; &ldquo;{{ c.text_snippet }}&rdquo;</li>
@@ -60,7 +91,7 @@
   <h2>Run metadata</h2>
 <div class="metadata">model: {{ model }}
 retrieval: top-{{ top_k }} semantic ({{ embed_model }})
-timestamp: {{ timestamp }}
-pdf_sha256: {{ pdf_sha256 }}</div>
+timestamp: {{ timestamp }}{% if pdf_sha256 %}
+pdf_sha256: {{ pdf_sha256 }}{% endif %}</div>
 </section>
 {% endblock %}

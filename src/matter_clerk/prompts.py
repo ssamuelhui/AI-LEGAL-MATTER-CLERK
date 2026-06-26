@@ -24,9 +24,11 @@ are operating in MATTER-ONLY MODE: no external legal authority has been \
 retrieved for this run. Follow these rules without exception, regardless of \
 the task:
 
-1. Every factual claim you make carries an inline citation in the form \
-[FILENAME p.N], where FILENAME and N come from the passage's "[SOURCE: ...]" \
-header. Do not invent filenames or page numbers.
+1. Every factual claim you make carries an inline citation copied exactly as \
+written in the passage's "[SOURCE: ...]" header -- for example [FILENAME p.N] \
+for a page of a PDF, or [FILENAME from Sender, DATE] for an email. Reproduce \
+the source label verbatim. Do not invent filenames, page numbers, senders, or \
+dates, and do not reformat the label.
 
 2. You may cite only passages that appear in the CONTEXT section of this \
 prompt. You must not cite any case, statute, regulation, rule, or other legal \
@@ -47,6 +49,59 @@ appear in the cited passage.
 
 The task-specific instructions follow. They refine HOW to present the output, \
 but they never override the five rules above."""
+
+
+# --------------------------------------------------------------------------
+# Matter-aware (cross-document) prompt switch (Day 4b).
+#
+# When a query runs across a whole matter, the prompts must stop assuming a
+# single document. We do this WITHOUT editing the YAML templates so the
+# single-file path stays character-identical (preserving the gold-set baseline
+# and all Day 3/3.5 safety testing). Two code-owned, reversible transforms,
+# applied only when cross_document=True:
+#
+#   1. _matterize_preamble: swap the SAFETY_PREAMBLE opening clause.
+#   2. _MATTER_PHRASES: a literal phrase map applied to the task body (and any
+#      pleading variant). Ordered longest/most-specific first so the "this
+#      single ..." forms are consumed before the bare catch-all.
+#
+# The newline variant exists because timeline.yaml wraps the phrase as
+# "this single\nlegal-matter document"; a space-only key would silently miss it.
+# --------------------------------------------------------------------------
+_PREAMBLE_SINGLE_CLAUSE = "on a single legal-matter document"
+_PREAMBLE_MATTER_CLAUSE = "on the documents in this matter (the case file)"
+
+MATTER_CONTEXT_NOTE = (
+    "The CONTEXT may contain passages from multiple documents in this matter. "
+    "Each passage's [SOURCE: ...] header identifies which document it came from; "
+    "cite accordingly."
+)
+
+_MATTER_PHRASES = {
+    "this single\nlegal-matter document": "these matter documents",  # timeline (wrapped)
+    "this single legal-matter document": "these matter documents",
+    "single legal-matter document": "matter documents (the case file)",  # catch-all
+}
+
+
+def _matterize(text: str) -> str:
+    """Apply the literal matter-mode phrase map to a task body / variant."""
+    for old, new in _MATTER_PHRASES.items():
+        text = text.replace(old, new)
+    return text
+
+
+def _matterize_preamble(preamble: str) -> str:
+    """Swap the preamble's single-document opening clause. Fails loud if the
+    clause has drifted, so a preamble edit can never silently leave matter mode
+    still claiming 'a single legal-matter document'."""
+    if _PREAMBLE_SINGLE_CLAUSE not in preamble:
+        raise ValueError(
+            "SAFETY_PREAMBLE opening clause "
+            f"{_PREAMBLE_SINGLE_CLAUSE!r} not found; the matter-mode swap cannot "
+            "be applied. Update _PREAMBLE_SINGLE_CLAUSE to match the preamble."
+        )
+    return preamble.replace(_PREAMBLE_SINGLE_CLAUSE, _PREAMBLE_MATTER_CLAUSE)
 
 
 # --------------------------------------------------------------------------
@@ -193,9 +248,23 @@ def missing_required_inputs(
 # Prompt assembly
 # --------------------------------------------------------------------------
 def build_system_prompt(
-    template: TaskTemplate, structured_inputs: dict | None = None
+    template: TaskTemplate,
+    structured_inputs: dict | None = None,
+    cross_document: bool = False,
 ) -> str:
-    parts = [SAFETY_PREAMBLE, template.system_prompt.strip()]
+    """Assemble the system prompt: code-owned SAFETY_PREAMBLE + task body (+ any
+    pleading variant). When cross_document is True (a matter scatter-gather
+    query), the preamble clause is swapped, a MATTER CONTEXT note is inserted,
+    and the matter phrase map is applied to the body/variant. When False the
+    output is character-identical to the single-document behaviour."""
+    if cross_document:
+        parts = [
+            _matterize_preamble(SAFETY_PREAMBLE),
+            MATTER_CONTEXT_NOTE,
+            _matterize(template.system_prompt.strip()),
+        ]
+    else:
+        parts = [SAFETY_PREAMBLE, template.system_prompt.strip()]
     if template.variants:
         si = structured_inputs or {}
         key = si.get("pleading_type")
@@ -205,7 +274,8 @@ def build_system_prompt(
                 f"Task '{template.id}' requires a valid pleading_type "
                 f"(one of {list(template.variants)}); got {key!r}"
             )
-        parts.append(variant.strip())
+        v = variant.strip()
+        parts.append(_matterize(v) if cross_document else v)
     return "\n\n".join(parts)
 
 
@@ -231,7 +301,7 @@ def build_user_message(
 ) -> str:
     lines: list[str] = ["CONTEXT:", ""]
     for c in retrieved_chunks:
-        lines.append(f"[SOURCE: {c['source']} p.{c['page']}]")
+        lines.append(f"[SOURCE: {c['source']} {c['locator']}]")
         lines.append(c["text"])
         lines.append("")
     lines.append("REQUEST:")

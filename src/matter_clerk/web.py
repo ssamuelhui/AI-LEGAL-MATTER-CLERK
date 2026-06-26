@@ -2,23 +2,32 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
 import bleach
 import markdown as md
 from dotenv import load_dotenv
-from flask import Flask, render_template, request
+from flask import (
+    Flask,
+    abort,
+    flash,
+    redirect,
+    render_template,
+    request,
+    url_for,
+)
 from werkzeug.serving import make_server
 
-from . import pipeline, pleadings
+from . import audit, matters, pipeline, pleadings
 from .prompts import (
     DEFAULT_TASK,
     get_template,
     missing_required_inputs,
     ordered_templates,
 )
-from .vectorstore import connect
+from .vectorstore import connect, file_hash
 
 log = logging.getLogger("matter_clerk.web")
 
@@ -83,31 +92,343 @@ def _display_inputs(template, structured_inputs: dict) -> dict:
     return out
 
 
+def _render_result(result, template, task, structured_inputs, back_url, back_label):
+    """Render result.html. Shared by the ad-hoc and matter query paths; the only
+    per-context difference is the back link."""
+    is_pleading = task == "draft_pleading"
+    return render_template(
+        "result.html",
+        back_url=back_url,
+        back_label=back_label,
+        task_label=template.label,
+        party_role=(
+            pleadings.role_for(structured_inputs.get("pleading_type"))
+            if is_pleading
+            else None
+        ),
+        request_summary=_display_inputs(template, structured_inputs),
+        is_pleading=is_pleading,
+        draft_banner=pleadings.DRAFT_BANNER if is_pleading else None,
+        cover_note_html=(
+            render_markdown(pleadings.COVER_NOTE) if is_pleading else None
+        ),
+        pleading_warnings=result.pleading_warnings,
+        email_metadata=result.email_metadata,
+        attachment_warnings=result.attachment_warnings,
+        answer_html=render_markdown(result.answer),
+        citations=result.citations,
+        cross_document=result.cross_document,
+        retrieved_sources=result.retrieved_sources,
+        ocr_pages=result.ocr_pages,
+        unreadable_pages=result.unreadable_pages,
+        model=result.model,
+        embed_model=result.embed_model,
+        top_k=result.top_k,
+        timestamp=result.timestamp,
+        pdf_sha256=result.pdf_sha256,
+    )
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
-    app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB
+    app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB (whole request)
+    # Random per-process key: enough to sign the flash cookie for this single-user
+    # local tool. A restart invalidates outstanding flash cookies, which is fine.
+    app.secret_key = os.urandom(24)
 
-    def render_index(status=200, **kw):
+    # ----------------------------------------------------------------------
+    # Render helpers (kept inside create_app so url_for is available)
+    # ----------------------------------------------------------------------
+    def render_ad_hoc(status=200, **kw):
+        ok, err = _qdrant_ok()
         defaults = dict(
-            qdrant_ok=True,
-            qdrant_err=None,
-            tasks=ordered_templates(),
-            selected_task=DEFAULT_TASK,
-            values={},
-            top_k="",
-            reindex=False,
-            limitation_signals=None,
+            qdrant_ok=ok, qdrant_err=err, error=None,
+            tasks=ordered_templates(), selected_task=DEFAULT_TASK,
+            values={}, top_k="", reindex=False, limitation_signals=None,
+            action=url_for("ad_hoc_query"),
         )
         defaults.update(kw)
-        return render_template("index.html", **defaults), status
+        return render_template("ad_hoc.html", **defaults), status
 
+    def render_matter_detail(conn, matter_id, status=200, **kw):
+        matter = matters.get_matter(conn, matter_id)
+        files = matters.list_files(conn, matter_id)
+        queryable = [f for f in files if f.ingest_status == "ingested"]
+        ok, err = _qdrant_ok()
+        defaults = dict(
+            qdrant_ok=ok, qdrant_err=err, error=None,
+            matter=matter, files=files,
+            queryable_files=queryable, matter_files=queryable,
+            tasks=ordered_templates(), selected_task=DEFAULT_TASK,
+            values={}, top_k="", limitation_signals=None, limitation_by_file=None,
+            selected_file_id=None,
+            action=url_for("matter_query", matter_id=matter_id),
+        )
+        defaults.update(kw)
+        return render_template("matter_detail.html", **defaults), status
+
+    def _ingest_upload_into_matter(conn, matter, upload) -> None:
+        """Ingest one uploaded file into the matter, flashing a per-file result.
+        Never raises: a bad file in a multi-file batch must not abort the rest
+        or 500 the request. Manifest row is inserted (and duplicate-checked by
+        content hash) BEFORE any copy/ingest work; a failed ingest leaves a
+        'failed' row with the error rather than a silent gap."""
+        filename = upload.filename
+        suffix = Path(filename).suffix.lower()
+        if suffix not in (".pdf", ".eml"):
+            flash(f"{filename}: unsupported file type (use .pdf or .eml).", "error")
+            return
+
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp.close()
+        tmp_path: Path | None = Path(tmp.name)
+        try:
+            upload.save(str(tmp_path))
+            sha = file_hash(tmp_path)
+            coll = matters.collection_name(matter.id, sha)
+            stored = matters.stored_path_for(matter.id, sha, suffix)
+            try:
+                row = matters.add_file_pending(
+                    conn, matter.id, filename,
+                    "eml" if suffix == ".eml" else "pdf",
+                    sha, coll, str(stored),
+                )
+            except matters.DuplicateFileInMatter as e:
+                flash(str(e), "warn")
+                return
+            stored.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(tmp_path), str(stored))
+            tmp_path = None  # moved into the store; nothing left to clean up
+            try:
+                pipeline.ingest_file(stored, filename, collection=coll)
+                matters.mark_file_ingested(conn, row.id)
+                flash(f"Added {filename}.", "ok")
+            except Exception as e:
+                matters.mark_file_failed(conn, row.id, str(e))
+                flash(f"{filename}: ingest failed: {e}", "error")
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+    # ----------------------------------------------------------------------
+    # Landing: matters list
+    # ----------------------------------------------------------------------
     @app.get("/")
     def index():
+        conn = matters.connect()
+        try:
+            ms = matters.list_matters(conn)
+        finally:
+            conn.close()
         ok, err = _qdrant_ok()
-        return render_index(qdrant_ok=ok, qdrant_err=err)[0]
+        return render_template(
+            "matters.html", matters=ms, qdrant_ok=ok, qdrant_err=err, error=None
+        )
 
-    @app.post("/ask")
-    def ask():
+    @app.post("/matters/new")
+    def matter_new():
+        name = (request.form.get("name") or "").strip()
+        description = (request.form.get("description") or "").strip()
+        conn = matters.connect()
+        try:
+            if not name:
+                flash("Matter name is required.", "error")
+                return redirect(url_for("index"))
+            try:
+                m = matters.create_matter(conn, name, description)
+            except matters.DuplicateMatterName as e:
+                flash(str(e), "error")
+                return redirect(url_for("index"))
+            flash(f"Created matter “{m.name}”.", "ok")
+            return redirect(url_for("matter_detail", matter_id=m.id))
+        finally:
+            conn.close()
+
+    # ----------------------------------------------------------------------
+    # Matter detail + file upload + query
+    # ----------------------------------------------------------------------
+    @app.get("/matters/<int:matter_id>")
+    def matter_detail(matter_id):
+        conn = matters.connect()
+        try:
+            try:
+                matters.get_matter(conn, matter_id)
+            except matters.MatterNotFound:
+                abort(404)
+            return render_matter_detail(conn, matter_id)
+        finally:
+            conn.close()
+
+    @app.post("/matters/<int:matter_id>/upload")
+    def matter_upload(matter_id):
+        conn = matters.connect()
+        try:
+            try:
+                matter = matters.get_matter(conn, matter_id)
+            except matters.MatterNotFound:
+                abort(404)
+            uploads = [u for u in request.files.getlist("files") if u and u.filename]
+            if not uploads:
+                flash("No files selected.", "error")
+                return redirect(url_for("matter_detail", matter_id=matter_id))
+            for up in uploads:
+                _ingest_upload_into_matter(conn, matter, up)
+            return redirect(url_for("matter_detail", matter_id=matter_id))
+        finally:
+            conn.close()
+
+    @app.post("/matters/<int:matter_id>/query")
+    def matter_query(matter_id):
+        conn = matters.connect()
+        try:
+            try:
+                matters.get_matter(conn, matter_id)
+            except matters.MatterNotFound:
+                abort(404)
+
+            task = request.form.get("task") or DEFAULT_TASK
+            top_k_raw = (request.form.get("top_k") or "").strip()
+            try:
+                top_k = int(top_k_raw) if top_k_raw else None
+            except ValueError:
+                top_k = None
+            file_id_raw = (request.form.get("file_id") or "").strip()
+
+            try:
+                template = get_template(task)
+            except KeyError:
+                return render_matter_detail(
+                    conn, matter_id, status=400, error=f"Unknown task: {task}."
+                )
+
+            structured_inputs = _collect_web_inputs(template, request.form)
+            common = dict(
+                selected_task=task, values=structured_inputs,
+                top_k=top_k_raw, selected_file_id=file_id_raw,
+            )
+
+            # Dispatch on file_id presence (Day 4b). Default (no file_id) queries
+            # the whole matter via scatter-gather; an explicit file_id restricts
+            # to that one file — today's single-collection path, unchanged.
+            mf = None
+            files = None
+            if file_id_raw:
+                # ---- single-file branch: resolve + authorize BEFORE any work. A
+                # file_id that is non-integer, unknown, or from another matter is
+                # a clear refusal, never a 500. (Behaviour preserved from Day 4a.)
+                try:
+                    file_id = int(file_id_raw)
+                except (TypeError, ValueError):
+                    return render_matter_detail(
+                        conn, matter_id, status=400,
+                        error="Please choose a file to query.", **common
+                    )
+                try:
+                    mf = matters.get_file_in_matter(conn, matter_id, file_id)
+                except matters.MatterError as e:  # FileNotInMatter / unknown id
+                    return render_matter_detail(
+                        conn, matter_id, status=400, error=str(e), **common
+                    )
+                if mf.ingest_status != "ingested":
+                    return render_matter_detail(
+                        conn, matter_id, status=400,
+                        error=f"{mf.filename} is not successfully ingested "
+                              f"(status: {mf.ingest_status}).", **common
+                    )
+            else:
+                # ---- whole-matter branch: every successfully-ingested file ----
+                files = [
+                    f for f in matters.list_files(conn, matter_id)
+                    if f.ingest_status == "ingested"
+                ]
+                if not files:
+                    return render_matter_detail(
+                        conn, matter_id, status=400,
+                        error="This matter has no successfully ingested files to "
+                              "query.", **common
+                    )
+
+            missing = missing_required_inputs(template, structured_inputs)
+            if missing:
+                return render_matter_detail(
+                    conn, matter_id, status=400,
+                    error=f"Please provide: {', '.join(missing)}.", **common
+                )
+            if task == "draft_pleading":
+                pleading_errors = pleadings.validate_pleading_inputs(structured_inputs)
+                if pleading_errors:
+                    return render_matter_detail(
+                        conn, matter_id, status=400,
+                        error=" ".join(pleading_errors), **common
+                    )
+
+            try:
+                if mf is not None:
+                    result = pipeline.run_query(
+                        pdf_path=Path(mf.stored_path),
+                        source_name=mf.filename,
+                        task=task,
+                        structured_inputs=structured_inputs,
+                        top_k=top_k,
+                        reindex=False,            # already ingested; never re-ingest
+                        collection=mf.collection,  # pinned -> single-collection
+                        matter_id=matter_id,       # -> audit log
+                    )
+                else:
+                    result = pipeline.run_matter_query(
+                        files=files,
+                        task=task,
+                        structured_inputs=structured_inputs,
+                        matter_id=matter_id,
+                        top_k=top_k,
+                    )
+            except pipeline.QdrantUnreachable as e:
+                return render_matter_detail(
+                    conn, matter_id, status=503,
+                    qdrant_ok=False, qdrant_err=str(e), **common
+                )
+            except pipeline.PdfHasNoText as e:
+                return render_matter_detail(
+                    conn, matter_id, status=422, error=str(e), **common
+                )
+            except pipeline.LimitationReviewRequired as e:
+                return render_matter_detail(
+                    conn, matter_id, status=200,
+                    limitation_signals=e.signals,
+                    limitation_by_file=e.signals_by_file, **common
+                )
+
+            # Matter-context query audit (Day 4b): records which files grounded
+            # the answer. Fires ONLY for the whole-matter branch — never for the
+            # single-file branch (run_query has its own events) nor ad-hoc (no
+            # matter_id). No query text / particulars: file IDs are the audit
+            # signal and may not carry privileged content.
+            if mf is None:
+                audit.log_event(
+                    "matter_query",
+                    matter_id=matter_id,
+                    task=task,
+                    retrieved_file_ids=result.retrieved_file_ids,
+                )
+
+            matters.touch_last_queried(conn, matter_id)
+            return _render_result(
+                result, template, task, structured_inputs,
+                back_url=url_for("matter_detail", matter_id=matter_id),
+                back_label="Back to matter",
+            )
+        finally:
+            conn.close()
+
+    # ----------------------------------------------------------------------
+    # Ad-hoc single-file path (today's behavior, preserved)
+    # ----------------------------------------------------------------------
+    @app.get("/ad-hoc")
+    def ad_hoc():
+        return render_ad_hoc()
+
+    @app.post("/ad-hoc/query")
+    def ad_hoc_query():
         upload = request.files.get("pdf")
         task = request.form.get("task") or DEFAULT_TASK
         top_k_raw = (request.form.get("top_k") or "").strip()
@@ -120,9 +441,9 @@ def create_app() -> Flask:
         try:
             template = get_template(task)
         except KeyError:
-            return render_index(
-                status=400, error=f"Unknown task: {task}.", top_k=top_k_raw,
-                reindex=reindex,
+            return render_ad_hoc(
+                status=400, error=f"Unknown task: {task}.",
+                top_k=top_k_raw, reindex=reindex,
             )
 
         structured_inputs = _collect_web_inputs(template, request.form)
@@ -132,24 +453,28 @@ def create_app() -> Flask:
         )
 
         if not upload or not upload.filename:
-            return render_index(status=400, error="Please choose a PDF.", **common)
-
-        missing = missing_required_inputs(template, structured_inputs)
-        if missing:
-            return render_index(
+            return render_ad_hoc(
+                status=400, error="Please choose a PDF or .eml file.", **common
+            )
+        suffix = Path(upload.filename).suffix.lower()
+        if suffix not in (".pdf", ".eml"):
+            return render_ad_hoc(
                 status=400,
-                error=f"Please provide: {', '.join(missing)}.",
+                error="Unsupported file type. Upload a .pdf or .eml file.",
                 **common,
             )
 
+        missing = missing_required_inputs(template, structured_inputs)
+        if missing:
+            return render_ad_hoc(
+                status=400, error=f"Please provide: {', '.join(missing)}.", **common
+            )
         if task == "draft_pleading":
             pleading_errors = pleadings.validate_pleading_inputs(structured_inputs)
             if pleading_errors:
-                return render_index(
-                    status=400, error=" ".join(pleading_errors), **common
-                )
+                return render_ad_hoc(status=400, error=" ".join(pleading_errors), **common)
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
         tmp.close()
         tmp_path = Path(tmp.name)
         try:
@@ -162,42 +487,20 @@ def create_app() -> Flask:
                     structured_inputs=structured_inputs,
                     top_k=top_k,
                     reindex=reindex,
+                    # matter_id defaults to None -> audit records null for ad-hoc.
                 )
             except pipeline.QdrantUnreachable as e:
-                return render_index(status=503, qdrant_ok=False, qdrant_err=str(e),
-                                    **common)
+                return render_ad_hoc(status=503, qdrant_ok=False, qdrant_err=str(e), **common)
             except pipeline.PdfHasNoText as e:
-                return render_index(status=422, error=str(e), **common)
+                return render_ad_hoc(status=422, error=str(e), **common)
             except pipeline.LimitationReviewRequired as e:
-                return render_index(status=200, limitation_signals=e.signals, **common)
+                return render_ad_hoc(status=200, limitation_signals=e.signals, **common)
         finally:
             tmp_path.unlink(missing_ok=True)
 
-        is_pleading = task == "draft_pleading"
-        return render_template(
-            "result.html",
-            task_label=template.label,
-            party_role=(
-                pleadings.role_for(structured_inputs.get("pleading_type"))
-                if is_pleading
-                else None
-            ),
-            request_summary=_display_inputs(template, structured_inputs),
-            is_pleading=is_pleading,
-            draft_banner=pleadings.DRAFT_BANNER if is_pleading else None,
-            cover_note_html=(
-                render_markdown(pleadings.COVER_NOTE) if is_pleading else None
-            ),
-            pleading_warnings=result.pleading_warnings,
-            answer_html=render_markdown(result.answer),
-            citations=result.citations,
-            ocr_pages=result.ocr_pages,
-            unreadable_pages=result.unreadable_pages,
-            model=result.model,
-            embed_model=result.embed_model,
-            top_k=result.top_k,
-            timestamp=result.timestamp,
-            pdf_sha256=result.pdf_sha256,
+        return _render_result(
+            result, template, task, structured_inputs,
+            back_url=url_for("ad_hoc"), back_label="Run another task",
         )
 
     return app

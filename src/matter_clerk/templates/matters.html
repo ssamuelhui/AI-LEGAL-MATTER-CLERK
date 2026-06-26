@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block content %}
+{% if not qdrant_ok %}
+<div class="banner error">
+  <strong>Qdrant is not reachable.</strong> Start it with
+  <code>docker compose up -d</code> before querying.
+  {% if qdrant_err %}<div style="margin-top:6px;font-size:12px;">({{ qdrant_err }})</div>{% endif %}
+</div>
+{% endif %}
+{% for cat, msg in get_flashed_messages(with_categories=true) %}
+<div class="banner {{ 'info' if cat == 'ok' else cat }}">{{ msg }}</div>
+{% endfor %}
+{% if error %}<div class="banner error">{{ error }}</div>{% endif %}
+
+<section class="block">
+  <h2>Matters</h2>
+  {% if matters %}
+  <ul class="matter-list">
+    {% for m in matters %}
+    <li>
+      <a href="{{ url_for('matter_detail', matter_id=m.id) }}"><strong>{{ m.name }}</strong></a>
+      <span class="meta">{{ m.file_count }} file(s) &middot;
+        last queried: {{ m.last_queried_at[:10] if m.last_queried_at else "never" }}</span>
+      {% if m.description %}<div class="meta">{{ m.description }}</div>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="sub">No matters yet. Create one below.</p>
+  {% endif %}
+</section>
+
+<section class="block">
+  <h2>Create new matter</h2>
+  <form method="post" action="{{ url_for('matter_new') }}">
+    <label for="name">Matter name</label>
+    <input id="name" name="name" type="text" required
+           placeholder="e.g. Imperial Plaza condo dispute">
+    <label for="description">Description (optional)</label>
+    <input id="description" name="description" type="text"
+           placeholder="Short note about the case">
+    <button type="submit">Create matter</button>
+  </form>
+</section>
+
+<section class="block">
+  <h2>Single file, no matter</h2>
+  <p class="sub">Drag in one document for a quick cited query without creating a
+    matter. <a href="{{ url_for('ad_hoc') }}">Open single-file mode &rarr;</a></p>
+</section>
+
+<style>
+  .matter-list { list-style: none; padding: 0; }
+  .matter-list li { padding: 10px 12px; border: 1px solid #eee; border-radius: 4px;
+                    margin-bottom: 8px; }
+  .matter-list .meta { color: #666; font-size: 12px; display: block; margin-top: 2px; }
+</style>
+{% endblock %}
