@@ -73,6 +73,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="draft_pleading: affirm a limitation analysis has been completed.",
     )
     p.add_argument(
+        "--detail-level",
+        type=str,
+        default=None,
+        choices=["Concise", "Detailed"],
+        help="Task input for timeline: Detailed captures every dated event "
+        "(and, in matter mode, retrieves more per file). Default: Concise.",
+    )
+    p.add_argument(
         "--top-k",
         type=int,
         default=None,
@@ -98,6 +106,8 @@ def _collect_inputs(args: argparse.Namespace) -> dict:
     inputs: dict = {}
     if args.question:
         inputs["question"] = args.question
+    if args.detail_level:
+        inputs["detail_level"] = args.detail_level
     if args.recipient:
         inputs["recipient"] = args.recipient
     if args.categories:

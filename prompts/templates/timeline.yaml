@@ -8,6 +8,12 @@ inputs:
     required: false
     label: Optional focus
     placeholder: "Leave blank for the full chronology, or narrow it, e.g. 'events relating to the lease'."
+  - name: detail_level
+    type: select
+    required: false
+    label: Detail level
+    control: true
+    options: ["Concise", "Detailed"]
 
 retrieval_query: "dates, chronology of events, what happened on each date, filings, hearings, notices, deadlines, when events occurred"
 top_k: 14

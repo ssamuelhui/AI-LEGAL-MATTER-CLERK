@@ -77,6 +77,23 @@ MATTER_CONTEXT_NOTE = (
     "cite accordingly."
 )
 
+# --------------------------------------------------------------------------
+# Detailed-timeline instruction (Day 4c-a).
+#
+# Code-owned, like SAFETY_PREAMBLE and MATTER_CONTEXT_NOTE, so a template author
+# cannot weaken it and so it can be threaded into ANY assembly path (single-file
+# or matter) without editing the YAML. Appended after the task body ONLY when the
+# Timeline task's `detail_level` control input is "Detailed"; when "Concise" (or
+# absent) it is never appended and the prompt is byte-identical to pre-4c-a.
+# --------------------------------------------------------------------------
+DETAILED_TIMELINE_INSTRUCTION = (
+    "Capture EVERY dated event and material action mentioned in the retrieved "
+    "passages. Do not summarize or omit events. Err on the side of "
+    "over-inclusion. If in doubt about whether an event is material, include it. "
+    "The purpose of a detailed timeline is exhaustiveness, not editorial "
+    "selection."
+)
+
 _MATTER_PHRASES = {
     "this single\nlegal-matter document": "these matter documents",  # timeline (wrapped)
     "this single legal-matter document": "these matter documents",
@@ -130,6 +147,14 @@ class InputField(BaseModel):
     options: Optional[list[str]] = None  # select / multiselect
     default: Optional[list[str]] = None  # multiselect only
     show_when: Optional[ShowWhen] = None
+    # A "control" input steers HOW the task runs (retrieval depth, prompt mode)
+    # rather than supplying content. It still renders in the form and shows on
+    # the result page, but it is deliberately excluded from build_retrieval_query
+    # (it must not perturb the embed query) and from build_user_message's REQUEST
+    # section (it must not perturb the model's context). Day-4c-a's `detail_level`
+    # is the first such field; keeping "Concise" out of both builders is what
+    # makes Concise byte-identical to pre-4c-a behaviour.
+    control: bool = False
 
 
 class TaskTemplate(BaseModel):
@@ -276,6 +301,14 @@ def build_system_prompt(
             )
         v = variant.strip()
         parts.append(_matterize(v) if cross_document else v)
+    # Day 4c-a: the Timeline "Detailed" control appends the code-owned
+    # exhaustiveness instruction after the task body, in BOTH single-file and
+    # matter modes. Read from structured_inputs (like `pleading_type` above), so
+    # no new parameter is needed. Absent / "Concise" -> nothing appended ->
+    # byte-identical to pre-4c-a.
+    si = structured_inputs or {}
+    if (si.get("detail_level") or "Concise") == "Detailed":
+        parts.append(DETAILED_TIMELINE_INSTRUCTION)
     return "\n\n".join(parts)
 
 
@@ -288,6 +321,8 @@ def build_retrieval_query(template: TaskTemplate, structured_inputs: dict) -> st
     if template.retrieval_query:
         parts.append(template.retrieval_query)
     for field in template.inputs:
+        if field.control:          # control inputs never enter the embed query
+            continue
         val = structured_inputs.get(field.name)
         if not val:
             continue
@@ -307,6 +342,8 @@ def build_user_message(
     lines.append("REQUEST:")
     lines.append(f"Task: {template.label}")
     for field in template.inputs:
+        if field.control:          # control inputs never enter the REQUEST section
+            continue
         val = structured_inputs.get(field.name)
         if not val:
             continue

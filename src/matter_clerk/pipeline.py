@@ -43,6 +43,17 @@ from .vectorstore import (
 
 log = logging.getLogger("matter_clerk")
 
+# Day 4c-a: matter-mode Timeline "Detailed" retrieval depth. The lawyers' issue
+# is that a global top_k spread across N files loses per-file detail versus
+# single-file mode. Detailed raises the global top_k (which, per the Day-4b
+# scatter-gather, is ALSO the per-file fetch depth — one knob preserves the
+# losslessness guarantee: per_file >= global). 28 ~= 2x the Timeline template
+# default of 14; at ~700 tokens/chunk that is ~13-15k tokens typical, well
+# inside the model's context window. Only reached in matter mode; single-file is
+# already exhaustive within top_k, so Detailed changes only the prompt there. An
+# explicit Advanced top_k override still wins over this default.
+DETAILED_MATTER_TOP_K = 28
+
 
 class QdrantUnreachable(RuntimeError):
     """Raised when Qdrant is not reachable at the configured host/port."""
@@ -475,7 +486,16 @@ def run_matter_query(
     if not files:
         raise PdfHasNoText("This matter has no ingested files to query.")
 
-    resolved_top_k = top_k if top_k is not None else template.top_k
+    # Day 4c-a: the Timeline "Detailed" control raises matter-mode retrieval depth.
+    # An explicit Advanced top_k override always wins; otherwise Detailed uses
+    # DETAILED_MATTER_TOP_K and everything else falls back to the template default.
+    detail_level = structured_inputs.get("detail_level") or "Concise"
+    if top_k is not None:
+        resolved_top_k = top_k
+    elif detail_level == "Detailed":
+        resolved_top_k = DETAILED_MATTER_TOP_K
+    else:
+        resolved_top_k = template.top_k
     host, port, embed_model, model = _config()
 
     client = connect(host, port)
