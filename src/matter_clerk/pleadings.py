@@ -178,7 +178,7 @@ def scan_for_limitation(texts: list[str]) -> list[str]:
             if term and term not in seen:
                 seen.add(term)
                 signals.append(
-                    f'the matter text mentions "{term}" — review whether a '
+                    f'the matter text mentions "{term}" - review whether a '
                     f"limitation period or deadline applies"
                 )
 
@@ -189,7 +189,7 @@ def scan_for_limitation(texts: list[str]) -> list[str]:
         if oldest <= current - LIMITATION_YEARS:
             signals.append(
                 f"the matter references the year {oldest}, more than "
-                f"{LIMITATION_YEARS} years before {current} — a limitation "
+                f"{LIMITATION_YEARS} years before {current} - a limitation "
                 f"period may already have run"
             )
     return signals

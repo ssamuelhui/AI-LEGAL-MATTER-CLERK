@@ -257,6 +257,10 @@ def _matter_main(argv: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    # qdrant-client logs every request via httpx at INFO ("HTTP Request: GET
+    # ... 200 OK"); quiet it to WARNING so successful calls are silent but
+    # failures still surface. Matches web.main().
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     load_dotenv()
 
     raw = sys.argv[1:] if argv is None else argv

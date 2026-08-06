@@ -509,6 +509,11 @@ def create_app() -> Flask:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
+    # qdrant-client issues every request through httpx, whose INFO logger prints
+    # "HTTP Request: GET http://localhost:6333/... 200 OK" for each call — demo
+    # noise. Quiet it to WARNING so successful calls are silent but failures
+    # still surface.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     load_dotenv()
 
     host = "127.0.0.1"

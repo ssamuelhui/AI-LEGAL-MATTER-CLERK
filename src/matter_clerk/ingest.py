@@ -158,6 +158,7 @@ def _chunk_tokens(
 def chunk_pages(
     pages: list[tuple[int, str]],
     source: str,
+    ocr_pages: set[int] | list[int] | None = None,
     chunk_tokens: int = CHUNK_TARGET_TOKENS,
     overlap_tokens: int = CHUNK_OVERLAP_TOKENS,
 ) -> list[Chunk]:
@@ -167,11 +168,22 @@ def chunk_pages(
     citation — the cost of cross-page chunks is having to either lie about the
     page or attach a range, neither of which is acceptable under the citation
     discipline this project enforces.
+
+    `ocr_pages` are the page numbers whose text came from the OCR fallback (as
+    returned by `extract_pdf_pages`). Those pages get a "(OCR)" suffix on their
+    locator — "p.3 (OCR)" — which then flows verbatim through the [SOURCE: ...]
+    header, the model's echoed citation, and the final Citation, so a lawyer
+    verifying against the source knows the snippet may carry OCR character
+    errors and is not a byte-exact copy. Omitted/None marks nothing (the
+    backward-compatible default: existing callers and native-text PDFs are
+    unaffected).
     """
+    ocr = set(ocr_pages or ())
     chunks: list[Chunk] = []
     for page_no, text in pages:
+        locator = f"p.{page_no} (OCR)" if page_no in ocr else f"p.{page_no}"
         for piece in _chunk_tokens(text, chunk_tokens, overlap_tokens):
-            chunks.append(Chunk(source=source, locator=f"p.{page_no}", text=piece))
+            chunks.append(Chunk(source=source, locator=locator, text=piece))
     return chunks
 
 

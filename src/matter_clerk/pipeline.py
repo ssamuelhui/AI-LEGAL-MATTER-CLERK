@@ -204,7 +204,7 @@ def ingest_file(
             )
             if not pages:
                 raise PdfHasNoText(f"No extractable text on any page of {source_name}.")
-            chunks = chunk_pages(pages, source=source_name)
+            chunks = chunk_pages(pages, source=source_name, ocr_pages=ocr_pages)
         log.info(f"Embedding {len(chunks)} chunks with {embed_model} ...")
         vectors = embed([c.text for c in chunks], model_name=embed_model)
         recreate_collection(client, coll, dim=embedding_dimension(embed_model))

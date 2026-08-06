@@ -21,4 +21,6 @@ def embed(texts: list[str], model_name: str) -> list[list[float]]:
 
 
 def embedding_dimension(model_name: str) -> int:
-    return _get_model(model_name).get_sentence_embedding_dimension()
+    # get_embedding_dimension() replaced the deprecated
+    # get_sentence_embedding_dimension() in sentence-transformers.
+    return _get_model(model_name).get_embedding_dimension()
