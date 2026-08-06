@@ -9,14 +9,17 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from . import matters, pipeline, pleadings
-from .prompts import DEFAULT_TASK, missing_required_inputs, ordered_templates
+from .prompts import DEFAULT_TASK, available_tasks, missing_required_inputs
 from .vectorstore import file_hash
 
 log = logging.getLogger("matter_clerk")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    task_ids = [t.id for t in ordered_templates()]
+    # This CLI is the single-file path (--pdf), so matter-only tasks such as
+    # compare_clauses are not offered here (Day 4c). Cross-matter querying has no
+    # CLI verb yet — see BACKLOG "CLI matter query subcommand".
+    task_ids = [t.id for t in available_tasks(None)]
     p = argparse.ArgumentParser(
         prog="matter-clerk",
         description="One PDF + one task -> cited output (matter-only).",

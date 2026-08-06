@@ -24,6 +24,7 @@ from .llm import LLMClient
 from .matters import MatterFile
 from .prompts import (
     TaskTemplate,
+    build_comparison_user_message,
     build_retrieval_query,
     build_system_prompt,
     build_user_message,
@@ -36,6 +37,7 @@ from .vectorstore import (
     default_collection_name,
     file_hash,
     recreate_collection,
+    retrieve_per_file_by_query,
     search,
     search_across_collections,
     upsert_chunks,
@@ -54,6 +56,37 @@ log = logging.getLogger("matter_clerk")
 # explicit Advanced top_k override still wins over this default.
 DETAILED_MATTER_TOP_K = 28
 
+# --------------------------------------------------------------------------
+# Compare Clauses retrieval budget (Day 4c).
+#
+# This task's retrieval is per-file, not merged-to-a-global-top-k, so context
+# grows LINEARLY with the number of files compared — the opposite of the Day-4b
+# scatter-gather, whose whole point is that a 20-file matter costs the same as
+# one file. Two independent limits keep that in hand, and neither is silent:
+#
+#   COMPARE_MAX_FILES  A hard refusal above 20 files, surfaced in the form as a
+#       warning telling the user to restrict the selection. Deliberately NOT a
+#       silent truncation to the first 20: a comparison table that quietly omits
+#       documents is a wrong answer that looks like a right one.
+#   COMPARE_TOTAL_CHUNK_BUDGET  Reduces per-file DEPTH as the file count rises,
+#       never the file COUNT. Every selected file keeps its column; it just
+#       contributes fewer passages. Floored at COMPARE_MIN_PER_FILE_TOP_K,
+#       below which a file cannot show a clause plus enough context to compare
+#       it, so the floor wins and the budget is knowingly exceeded (logged).
+#
+# The effective per-file depth is reported on the result page rather than the
+# template's nominal 6, so a reduced run is visible to the lawyer reading it.
+# An explicit Advanced top_k is a per-file override and bypasses the budget.
+#
+# At the 20-file ceiling: floor(40/20)=2 -> floored to 3 -> 60 chunks, roughly
+# 30k tokens at this codebase's ~500-token typical chunk. Comfortably inside the
+# model window; the table itself is compact output.
+# --------------------------------------------------------------------------
+COMPARE_TASK_ID = "compare_clauses"
+COMPARE_MAX_FILES = 20
+COMPARE_TOTAL_CHUNK_BUDGET = 40
+COMPARE_MIN_PER_FILE_TOP_K = 3
+
 
 class QdrantUnreachable(RuntimeError):
     """Raised when Qdrant is not reachable at the configured host/port."""
@@ -66,6 +99,14 @@ class PdfHasNoText(RuntimeError):
 
 class UnknownTask(RuntimeError):
     """Raised when an unrecognised task id is requested."""
+
+
+class CompareClausesNotApplicable(RuntimeError):
+    """Raised when Compare Clauses is asked to run over a file set it cannot
+    honestly compare — fewer than 2 files, or more than COMPARE_MAX_FILES.
+
+    The over-limit case is a refusal rather than a truncation on purpose: a
+    comparison table silently missing documents reads as a complete answer."""
 
 
 @dataclass
@@ -362,6 +403,10 @@ def _answer_and_build(
     cross_document: bool = False,
     retrieved_sources: list[str] | None = None,
     retrieved_file_ids: list[int] | None = None,
+    # Day 4c: Compare Clauses supplies its own file-grouped user message (see
+    # build_comparison_user_message). When None — every other task — the
+    # standard flat-CONTEXT builder runs, byte-identically to before.
+    user_message: str | None = None,
     # Single-file ingest provenance; matter mode omits these -> harmless defaults
     # (no fresh ingest happened, so there is no single sha/collection).
     ocr_pages: list[int] | None = None,
@@ -391,7 +436,11 @@ def _answer_and_build(
             },
             {
                 "role": "user",
-                "content": build_user_message(template, structured_inputs, retrieved),
+                "content": (
+                    user_message
+                    if user_message is not None
+                    else build_user_message(template, structured_inputs, retrieved)
+                ),
             },
         ]
     )
@@ -584,4 +633,139 @@ def run_matter_query(
         cross_document=True,
         retrieved_sources=retrieved_sources,
         retrieved_file_ids=retrieved_file_ids,
+    )
+
+
+def compare_per_file_top_k(base_top_k: int, n_files: int) -> int:
+    """Effective per-file retrieval depth for a Compare Clauses run.
+
+    Shrinks depth so the total chunk count stays near COMPARE_TOTAL_CHUNK_BUDGET
+    as the file count rises, but never below COMPARE_MIN_PER_FILE_TOP_K — a file
+    contributing fewer than that cannot show a clause plus enough surrounding
+    text to compare it, and a thin column is a worse outcome than exceeding the
+    budget. Never reduces the number of FILES; every selected file keeps its
+    column. Pure and separate so it can be checked without a live Qdrant."""
+    if n_files <= 0:
+        return base_top_k
+    return max(COMPARE_MIN_PER_FILE_TOP_K, min(base_top_k, COMPARE_TOTAL_CHUNK_BUDGET // n_files))
+
+
+def run_compare_clauses(
+    files: list[MatterFile],
+    structured_inputs: dict,
+    matter_id: int,
+    top_k: int | None = None,
+) -> PipelineResult:
+    """Per-file retrieve -> compare across a matter's documents (Day 4c).
+
+    Structurally distinct from `run_matter_query` in all three of its stages,
+    which is why it is a third entry point rather than a branch:
+
+      * RETRIEVAL is per-file and kept grouped (`retrieve_per_file_by_query`),
+        not merged into a global top-k. Every selected file contributes its own
+        best passages about the clause, so no file can be outscored out of the
+        comparison.
+      * The PROMPT is built by `build_comparison_user_message`, which states
+        which documents were searched — including ones that yielded nothing.
+      * PROVENANCE means "checked", not "contributed": `retrieved_sources` and
+        `retrieved_file_ids` list every file that was searched, even one the
+        model ends up marking absent. A lawyer needs to know a document was
+        looked at and found wanting; that is a finding, not a gap.
+
+    `files` are the already-ingested matter files to compare, in the order their
+    columns should appear — the caller (web handler) has already resolved and
+    authorized any user subset selection. `top_k` is an explicit per-file
+    override from the Advanced box and bypasses the chunk budget.
+
+    No limitation gate: this task drafts nothing (the gate is pleading-specific
+    and `compare_clauses` declares no `variants`, so the shared gate would not
+    fire in any case)."""
+    try:
+        template = get_template(COMPARE_TASK_ID)
+    except KeyError:
+        raise UnknownTask(f"Unknown task: {COMPARE_TASK_ID!r}")
+
+    if len(files) < 2:
+        raise CompareClausesNotApplicable(
+            "Compare Clauses needs at least 2 documents to compare; "
+            f"{len(files)} selected."
+        )
+    if len(files) > COMPARE_MAX_FILES:
+        raise CompareClausesNotApplicable(
+            f"Compare Clauses is limited to {COMPARE_MAX_FILES} files; "
+            f"{len(files)} selected. Use the file selector to restrict the "
+            f"comparison to at most {COMPARE_MAX_FILES} files."
+        )
+
+    base_top_k = top_k if top_k is not None else template.top_k
+    per_file_top_k = (
+        top_k if top_k is not None else compare_per_file_top_k(base_top_k, len(files))
+    )
+    if per_file_top_k * len(files) > COMPARE_TOTAL_CHUNK_BUDGET:
+        log.warning(
+            f"Compare Clauses: {len(files)} files at the per-file floor of "
+            f"{per_file_top_k} exceeds the {COMPARE_TOTAL_CHUNK_BUDGET}-chunk "
+            f"budget ({per_file_top_k * len(files)} chunks)."
+        )
+
+    # Same filename twice in one matter is possible (the DB's uniqueness is on
+    # content hash, not name) and would give the table two identically-headed
+    # columns. Not renamed here: the column header must stay copy-exact with the
+    # citation label, and diverging them would break citation verification.
+    names = [f.filename for f in files]
+    if len(set(names)) != len(names):
+        log.warning(
+            "Compare Clauses: two or more selected files share a filename; "
+            "their table columns and citations will not be distinguishable."
+        )
+
+    host, port, embed_model, model = _config()
+    client = connect(host, port)
+    _precheck_qdrant(client)
+
+    log.info(
+        f"Comparing clauses across {len(files)} file(s), "
+        f"top-{per_file_top_k} per file ..."
+    )
+    # Design decision: the user's "clauses to compare" text IS the retrieval
+    # query, unreformulated. compare_clauses.yaml therefore carries no seed
+    # `retrieval_query`, so this returns exactly what the user typed.
+    retrieval_query = build_retrieval_query(template, structured_inputs)
+    query_vec = embed([retrieval_query], model_name=embed_model)[0]
+    by_collection = retrieve_per_file_by_query(
+        client, [f.collection for f in files], query_vec, per_file_top_k
+    )
+
+    groups: list[tuple[str, list[dict]]] = []
+    retrieved: list[dict] = []          # flat, in column order -> citations
+    for f in files:
+        chunks = [
+            {"source": sc.source, "locator": sc.locator, "text": sc.text}
+            for sc in by_collection.get(f.collection, [])
+        ]
+        groups.append((f.filename, chunks))
+        retrieved.extend(chunks)
+
+    if not retrieved:
+        raise PdfHasNoText(
+            "No passages about that clause were retrieved from any of the "
+            "selected files."
+        )
+
+    return _answer_and_build(
+        template=template,
+        task=COMPARE_TASK_ID,
+        structured_inputs=structured_inputs,
+        retrieved=retrieved,
+        model=model,
+        embed_model=embed_model,
+        resolved_top_k=per_file_top_k,
+        pleading_warnings=[],
+        cross_document=True,
+        # Every file CHECKED, not merely every file cited.
+        retrieved_sources=[f.filename for f in files],
+        retrieved_file_ids=[f.id for f in files],
+        user_message=build_comparison_user_message(
+            template, structured_inputs, groups
+        ),
     )

@@ -23,9 +23,10 @@ from werkzeug.serving import make_server
 from . import audit, matters, pipeline, pleadings
 from .prompts import (
     DEFAULT_TASK,
+    available_tasks,
     get_template,
     missing_required_inputs,
-    ordered_templates,
+    task_unavailable_reason,
 )
 from .vectorstore import connect, file_hash
 
@@ -64,7 +65,7 @@ def _collect_web_inputs(template, form) -> dict:
     """Pull this task's declared inputs out of the submitted form."""
     inputs: dict = {}
     for field in template.inputs:
-        if field.type == "multiselect":
+        if field.type in ("multiselect", "file_multiselect"):
             vals = form.getlist(field.name)
             if vals:
                 inputs[field.name] = vals
@@ -81,8 +82,14 @@ def _collect_web_inputs(template, form) -> dict:
 def _display_inputs(template, structured_inputs: dict) -> dict:
     """Map raw input names/values to friendly labels/strings for the result page."""
     label_by_name = {f.name: f.label for f in template.inputs}
+    # file_multiselect values are opaque file ids, and the files actually used are
+    # already reported honestly by the "Compared across:" provenance line — so
+    # showing raw ids here would be both unreadable and redundant.
+    skip = {f.name for f in template.inputs if f.type == "file_multiselect"}
     out: dict = {}
     for name, val in structured_inputs.items():
+        if name in skip:
+            continue
         key = label_by_name.get(name, name)
         if isinstance(val, bool):
             val = "Yes" if val else "No"
@@ -96,8 +103,14 @@ def _render_result(result, template, task, structured_inputs, back_url, back_lab
     """Render result.html. Shared by the ad-hoc and matter query paths; the only
     per-context difference is the back link."""
     is_pleading = task == "draft_pleading"
+    is_compare = task == pipeline.COMPARE_TASK_ID
     return render_template(
         "result.html",
+        is_compare=is_compare,
+        # "Drew on" asserts contribution, which is wrong for Compare Clauses:
+        # its provenance list includes files that were searched and found to
+        # lack the clause. That is a finding, so it gets honest wording.
+        provenance_label="Compared across" if is_compare else "Drew on",
         back_url=back_url,
         back_label=back_label,
         task_label=template.label,
@@ -143,7 +156,8 @@ def create_app() -> Flask:
         ok, err = _qdrant_ok()
         defaults = dict(
             qdrant_ok=ok, qdrant_err=err, error=None,
-            tasks=ordered_templates(), selected_task=DEFAULT_TASK,
+            # Matter-only tasks (Compare Clauses) never appear on the ad-hoc form.
+            tasks=available_tasks(None), selected_task=DEFAULT_TASK,
             values={}, top_k="", reindex=False, limitation_signals=None,
             action=url_for("ad_hoc_query"),
         )
@@ -159,7 +173,10 @@ def create_app() -> Flask:
             qdrant_ok=ok, qdrant_err=err, error=None,
             matter=matter, files=files,
             queryable_files=queryable, matter_files=queryable,
-            tasks=ordered_templates(), selected_task=DEFAULT_TASK,
+            # Compare Clauses appears only once the matter holds 2+ ingested files.
+            tasks=available_tasks(len(queryable)),
+            compare_max_files=pipeline.COMPARE_MAX_FILES,
+            selected_task=DEFAULT_TASK,
             values={}, top_k="", limitation_signals=None, limitation_by_file=None,
             selected_file_id=None,
             action=url_for("matter_query", matter_id=matter_id),
@@ -307,6 +324,28 @@ def create_app() -> Flask:
                 top_k=top_k_raw, selected_file_id=file_id_raw,
             )
 
+            # Server-side counterparts to the form's task filtering + JS gating
+            # (Day 4c). The form hides Compare Clauses on a <2-file matter and
+            # hides the single-file picker when it is selected; these catch a
+            # POST that arrives regardless.
+            n_ingested = len([
+                f for f in matters.list_files(conn, matter_id)
+                if f.ingest_status == "ingested"
+            ])
+            unavailable = task_unavailable_reason(task, n_ingested)
+            if unavailable:
+                return render_matter_detail(
+                    conn, matter_id, status=400, error=unavailable, **common
+                )
+            if task == pipeline.COMPARE_TASK_ID and file_id_raw:
+                return render_matter_detail(
+                    conn, matter_id, status=400,
+                    error="Compare Clauses runs across the documents in this "
+                          "matter. Clear the single-file restriction, and use "
+                          "“Compare across which files?” to narrow the "
+                          "comparison instead.", **common
+                )
+
             # Dispatch on file_id presence (Day 4b). Default (no file_id) queries
             # the whole matter via scatter-gather; an explicit file_id restricts
             # to that one file — today's single-collection path, unchanged.
@@ -347,6 +386,41 @@ def create_app() -> Flask:
                         error="This matter has no successfully ingested files to "
                               "query.", **common
                     )
+                if task == pipeline.COMPARE_TASK_ID:
+                    # Optional user subset. Authorize every submitted id against
+                    # this matter exactly as the file_id path does — a tampered
+                    # or foreign id is a refusal, never a 500 and never a silent
+                    # drop. Column order follows the matter's file order, not the
+                    # order the checkboxes happened to submit in.
+                    picked_raw = structured_inputs.get("file_ids") or []
+                    if picked_raw:
+                        picked: set[int] = set()
+                        for raw in picked_raw:
+                            try:
+                                fid = int(raw)
+                            except (TypeError, ValueError):
+                                return render_matter_detail(
+                                    conn, matter_id, status=400,
+                                    error="Invalid file selection.", **common
+                                )
+                            try:
+                                sel = matters.get_file_in_matter(
+                                    conn, matter_id, fid
+                                )
+                            except matters.MatterError as e:
+                                return render_matter_detail(
+                                    conn, matter_id, status=400,
+                                    error=str(e), **common
+                                )
+                            if sel.ingest_status != "ingested":
+                                return render_matter_detail(
+                                    conn, matter_id, status=400,
+                                    error=f"{sel.filename} is not successfully "
+                                          f"ingested (status: "
+                                          f"{sel.ingest_status}).", **common
+                                )
+                            picked.add(fid)
+                        files = [f for f in files if f.id in picked]
 
             missing = missing_required_inputs(template, structured_inputs)
             if missing:
@@ -374,6 +448,13 @@ def create_app() -> Flask:
                         collection=mf.collection,  # pinned -> single-collection
                         matter_id=matter_id,       # -> audit log
                     )
+                elif task == pipeline.COMPARE_TASK_ID:
+                    result = pipeline.run_compare_clauses(
+                        files=files,
+                        structured_inputs=structured_inputs,
+                        matter_id=matter_id,
+                        top_k=top_k,
+                    )
                 else:
                     result = pipeline.run_matter_query(
                         files=files,
@@ -382,6 +463,10 @@ def create_app() -> Flask:
                         matter_id=matter_id,
                         top_k=top_k,
                     )
+            except pipeline.CompareClausesNotApplicable as e:
+                return render_matter_detail(
+                    conn, matter_id, status=400, error=str(e), **common
+                )
             except pipeline.QdrantUnreachable as e:
                 return render_matter_detail(
                     conn, matter_id, status=503,
@@ -451,6 +536,12 @@ def create_app() -> Flask:
             selected_task=task, values=structured_inputs,
             top_k=top_k_raw, reindex=reindex,
         )
+
+        # Matter-only tasks are absent from this form's dropdown; refuse cleanly
+        # if one is posted anyway (Day 4c).
+        unavailable = task_unavailable_reason(task, None)
+        if unavailable:
+            return render_ad_hoc(status=400, error=unavailable, **common)
 
         if not upload or not upload.filename:
             return render_ad_hoc(

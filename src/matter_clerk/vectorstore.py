@@ -119,6 +119,53 @@ def search_across_collections(
     return merged[:top_k]
 
 
+def retrieve_per_file_by_query(
+    client: QdrantClient,
+    collections: list[str],
+    query_vec: list[float],
+    top_k: int,
+) -> dict[str, list[ScoredChunk]]:
+    """Per-collection retrieval that keeps hits GROUPED by their source (Day 4c).
+
+    Deliberately NOT a mode of `search_across_collections`. That function fetches
+    per collection and then merges into one global top-k list; this one fetches
+    per collection and stops there. The return type is the difference that
+    matters: a dict keyed by collection, not a flat list.
+
+    Two properties Compare Clauses depends on and the merging search cannot
+    provide:
+
+      1. The result is TOTAL over `collections`. Every requested collection is a
+         key, including one that returned no points, which maps to an empty
+         list. A merged top-k silently omits files that lost on score, and
+         "this file was searched and yielded nothing" is exactly the fact the
+         comparison must be able to state.
+      2. Insertion order follows `collections`, so the caller's file order
+         becomes the comparison's column order.
+
+    `top_k` is per collection here (not a global cap), so the total number of
+    chunks returned is `top_k * len(collections)`; the caller owns that budget.
+    A failing collection propagates rather than being skipped — same reasoning
+    as `search_across_collections`: a silent gap in a legal retrieval is worse
+    than a loud failure."""
+    out: dict[str, list[ScoredChunk]] = {}
+    for name in collections:
+        hits = client.query_points(
+            collection_name=name, query=query_vec, limit=top_k, with_payload=True
+        ).points
+        out[name] = [
+            ScoredChunk(
+                collection=name,
+                score=p.score,
+                source=p.payload["source"],
+                locator=p.payload["locator"],
+                text=p.payload["text"],
+            )
+            for p in hits
+        ]
+    return out
+
+
 def all_chunks(client: QdrantClient, name: str, batch: int = 256) -> list[str]:
     """Return the text of every chunk in a collection (no vectors).
 

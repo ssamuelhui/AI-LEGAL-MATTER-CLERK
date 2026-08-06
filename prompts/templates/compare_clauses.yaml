@@ -1,0 +1,101 @@
+id: compare_clauses
+label: Compare Clauses
+version: 1
+
+inputs:
+  - name: clauses_to_compare
+    type: text
+    required: true
+    # Noun phrase, not "Which clauses to compare?": this label is ALSO the key in
+    # the prompt's REQUEST section, where a question form renders as "?:" and
+    # reads as noise to the model. Matches the label style of every other task.
+    label: Clauses to compare
+    placeholder: "e.g. 'indemnity clauses', 'termination for convenience', 'insurance and coverage responsibilities'."
+  # Runtime-populated: one checkbox per ingested file in this matter. Empty means
+  # every file. `control: true` keeps the submitted file ids out of both the embed
+  # query and the REQUEST section — they steer which documents are compared, they
+  # are not content to compare.
+  - name: file_ids
+    type: file_multiselect
+    required: false
+    control: true
+    label: Compare across which files?
+
+# Deliberately EMPTY. Every other task blends a seed query with the user's input;
+# here the user's "clauses to compare" text IS the retrieval query, unreformulated.
+# A seed would pull each file's top-k toward generic contract vocabulary and blunt
+# the very distinction the comparison is meant to draw.
+retrieval_query: ""
+
+# PER FILE, not global — unlike every other task's top_k. Each selected file
+# contributes its own top-6 passages about the clause, so no document can be
+# outscored out of the comparison. pipeline.compare_per_file_top_k reduces this
+# as the file count rises to hold the total near the chunk budget.
+top_k: 6
+
+system_prompt: |
+  TASK: Compare how a specified clause or provision is treated across the
+  documents in this matter, and present the comparison as a single markdown
+  table.
+
+  The REQUEST section names the clause or provision to compare. The FILE
+  MANIFEST at the top of the message names every document that was searched, in
+  the order their columns must appear. The CONTEXT section gives the retrieved
+  passages, grouped under the document each came from.
+
+  Output exactly one markdown table, governed by these ten rules.
+
+  1. The first column is "Attribute". Every other column is one document from
+     the FILE MANIFEST, in manifest order, headed by that document's filename
+     copied exactly as written there. Include a column for EVERY document in
+     the manifest, including any document the manifest marks as having no
+     retrieved passages.
+
+  2. The rows are the attributes on which this kind of clause is meaningfully
+     compared. Derive them from the clause named in the request and from what
+     the retrieved text of THESE documents actually supports — do not work from
+     a fixed list. An indemnity clause, for instance, is naturally compared on
+     who indemnifies whom, the losses covered, exclusions, monetary caps, and
+     notice requirements; a termination clause on notice period, termination
+     for cause, termination for convenience, and consequences. Give each row a
+     short label.
+
+  3. The first row is always "Clause located at": the section number or heading
+     where the clause appears in that document, with its citation.
+
+  4. Each remaining cell states what that document provides for that attribute
+     — in your own words, or a short quotation where the exact wording matters
+     — followed by the inline citation for the passage that establishes it,
+     copied exactly from that passage's "[SOURCE: ...]" header.
+
+  5. Every cell holds exactly one of these four things. Never leave a cell
+     empty.
+       a. Grounded content with its citation.
+       b. "Not stated" — this document has the clause, but the retrieved
+          passages say nothing about this attribute.
+       c. "Not present in this document" — this document does not contain the
+          clause at all. This goes in the document's "Clause located at" cell.
+       d. "-" — filler for the remaining cells of a column whose "Clause
+          located at" cell reads "Not present in this document".
+
+  6. Treat the clause as present in a document only if a retrieved passage from
+     THAT document actually contains it. Do not infer that a document contains
+     the clause because other documents in this matter do, and do not infer it
+     from a document's title or apparent type.
+
+  7. Where the manifest records that no passages were retrieved from a
+     document, that document was searched and nothing relevant was found: its
+     column reads "Not present in this document".
+
+  8. Distinguishing 5b from 5c matters: a document that has an indemnity clause
+     which is silent on caps is a different fact, with different consequences,
+     from a document that has no indemnity clause at all. Do not collapse them.
+
+  9. If NO document in the manifest contains the requested clause, do not emit
+     a table. Say so in one sentence and list the documents that were searched.
+
+  10. Do not add legal commentary, evaluation, or comparisons between documents
+      in the table cells. State what each clause says. Do not judge which
+      version is stronger, weaker, more favourable, riskier, or better drafted,
+      and do not recommend which one to prefer. Setting the clauses side by side
+      is the output; the analysis is the reader's to perform.

@@ -43,7 +43,9 @@
   {# Day 4b: the default is to query the WHOLE matter (no file_id submitted).   #}
   {# The picker is optional and collapsed; it reopens on a refusal re-render if  #}
   {# the user had previously restricted to a file (selected_file_id set).        #}
-  <details {% if selected_file_id %}open{% endif %}>
+  {# Hidden by JS when Compare Clauses is selected: restricting to ONE file      #}
+  {# contradicts a task that compares across documents. Server-side guarded too. #}
+  <details id="restrict-file" {% if selected_file_id %}open{% endif %}>
     <summary>Restrict to a specific file (optional)</summary>
     <label for="file_id">File to query</label>
     <select id="file_id" name="file_id">
@@ -72,6 +74,22 @@
   {% for t in tasks %}
   <div class="task-fields" data-task="{{ t.id }}"
        {% if t.id != selected_task %}hidden{% endif %}>
+    {% if t.id == 'compare_clauses' and matter_files is defined %}
+    {# Day 4c: file-count gate. Above compare_max_files the comparison is        #}
+    {# REFUSED, not silently truncated to the first N — a table quietly missing   #}
+    {# documents reads as a complete answer. The user restricts the selection.    #}
+    <div class="compare-gate" data-total="{{ matter_files|length }}"
+         data-max="{{ compare_max_files }}">
+      {% if matter_files|length > compare_max_files %}
+      <div class="banner warn">
+        Compare Clauses is limited to {{ compare_max_files }} files. Please use
+        the &ldquo;Compare across which files?&rdquo; selector to restrict to at
+        most {{ compare_max_files }} files.
+      </div>
+      {% endif %}
+      <div class="compare-gate-msg banner warn" hidden></div>
+    </div>
+    {% endif %}
     {% for f in t.inputs %}
     {% set is_active = (t.id == selected_task) %}
     {# limitation_confirmed is NOT a standing field: rendered only on a refusal #}
@@ -86,6 +104,29 @@
                  {% if is_active and values.get(f.name) %}checked{% endif %}>
           {{ f.label }}
         </label>
+      {% elif f.type == "file_multiselect" %}
+        {# Options are RUNTIME data (this matter's ingested files), not YAML      #}
+        {# `options`. Matter mode only — no file list exists on the ad-hoc form.  #}
+        {# Collapsed by default, matching "Restrict to a specific file"; reopens  #}
+        {# on a re-render if the user had made a selection. No "select all":      #}
+        {# leaving every box unchecked already means all files.                   #}
+        {% if matter_files is defined %}
+        <details class="file-subset" {% if is_active and values.get(f.name) %}open{% endif %}>
+          <summary>{{ f.label }}</summary>
+          <div class="hint">Leave every box unchecked to compare all
+            {{ matter_files|length }} files in this matter.</div>
+          <div class="checkboxes">
+            {% for mf in matter_files %}
+            <label class="inline">
+              <input type="checkbox" name="{{ f.name }}" value="{{ mf.id }}"
+                     {% if is_active and values.get(f.name)
+                           and mf.id|string in values.get(f.name) %}checked{% endif %}>
+              {{ mf.filename }} ({{ mf.file_type }})
+            </label>
+            {% endfor %}
+          </div>
+        </details>
+        {% endif %}
       {% else %}
         <label for="{{ t.id }}_{{ f.name }}">{{ f.label }}</label>
         {% if f.type == "textarea" %}
@@ -181,20 +222,72 @@
       });
     }
 
+    // Day 4c: Compare Clauses file-count gate. Valid selections are 2..max
+    // files; an empty selection means "all files" and is valid only when the
+    // matter itself is within the cap. Blocking submit here is a convenience —
+    // the server re-checks every one of these conditions.
+    var submitBtn = document.getElementById("askbtn");
+    var restrictFile = document.getElementById("restrict-file");
+
+    function updateCompareGate(group) {
+      var gate = group.querySelector(".compare-gate");
+      if (!gate) return true;
+      var total = parseInt(gate.dataset.total, 10);
+      var max = parseInt(gate.dataset.max, 10);
+      var boxes = group.querySelectorAll("input[name='file_ids']");
+      var picked = 0;
+      boxes.forEach(function (b) { if (b.checked) picked++; });
+
+      var msg = "";
+      if (picked === 0 && total > max) {
+        msg = "Select at most " + max + " files to compare (this matter has " +
+              total + ").";
+      } else if (picked === 1) {
+        msg = "Select at least 2 files to compare, or leave every box unchecked " +
+              "to compare all files.";
+      } else if (picked > max) {
+        msg = "Selected " + picked + " files; Compare Clauses is limited to " +
+              max + ".";
+      }
+      var el = gate.querySelector(".compare-gate-msg");
+      el.textContent = msg;
+      el.hidden = !msg;
+      return !msg;
+    }
+
     function update() {
       var chosen = taskSelect.value;
+      var ok = true;
       groups.forEach(function (g) {
         var active = g.getAttribute("data-task") === chosen;
         g.hidden = !active;
         setControls(g, active);
-        if (active) updateConditionals(g);
+        if (active) {
+          updateConditionals(g);
+          ok = updateCompareGate(g);
+        }
       });
+      // Comparing across documents and restricting to one file are mutually
+      // exclusive; hide + disable the picker so it cannot submit a file_id.
+      if (restrictFile) {
+        var isCompare = chosen === "compare_clauses";
+        restrictFile.hidden = isCompare;
+        var sel = restrictFile.querySelector("select");
+        if (sel) {
+          if (isCompare) sel.value = "";
+          sel.disabled = isCompare;
+        }
+      }
+      if (submitBtn) submitBtn.disabled = !ok;
     }
 
     taskSelect.addEventListener("change", update);
     groups.forEach(function (g) {
       g.querySelectorAll("select").forEach(function (s) {
         s.addEventListener("change", function () { updateConditionals(g); });
+      });
+      g.querySelectorAll("input[name='file_ids']").forEach(function (b) {
+        b.addEventListener("change", update);
       });
     });
     update();

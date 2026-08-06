@@ -140,7 +140,14 @@ class InputField(BaseModel):
     (how the value is folded into the request)."""
 
     name: str
-    type: Literal["text", "textarea", "multiselect", "select", "checkbox"]
+    # "file_multiselect" (Day 4c) is the one type whose choices are RUNTIME data
+    # rather than YAML `options`: the form renders one checkbox per ingested file
+    # in the current matter. It is therefore matter-mode only, and its submitted
+    # values are file ids that the handler must authorize against the matter
+    # exactly as it does `file_id`.
+    type: Literal[
+        "text", "textarea", "multiselect", "select", "checkbox", "file_multiselect"
+    ]
     label: str
     required: bool = False
     placeholder: Optional[str] = None
@@ -183,6 +190,7 @@ TASK_ORDER = [
     "timeline",
     "find_facts",
     "find_entities",
+    "compare_clauses",
     "draft_memo",
     "draft_correspondence",
     "draft_pleading",
@@ -190,6 +198,58 @@ TASK_ORDER = [
 
 # The task selected by default (preserves the pre-Day-3 free-form Q&A behaviour).
 DEFAULT_TASK = "find_facts"
+
+# --------------------------------------------------------------------------
+# Task availability (Day 4c).
+#
+# Some tasks are meaningful only inside a matter, and only above a minimum file
+# count: comparing clauses ACROSS documents needs at least two documents. This
+# map is code-owned (not a YAML field) for the same reason the safety preamble
+# is: availability is a correctness rule, not a presentation preference a
+# template author should be able to relax.
+#
+# Enforced in three places from this one source of truth — the ad-hoc form, the
+# matter form, and the CLI's --task choices — plus a server-side re-check on
+# POST, so a hand-crafted request is a clean refusal rather than a nonsensical
+# run.
+# --------------------------------------------------------------------------
+MATTER_ONLY_TASKS: dict[str, int] = {
+    "compare_clauses": 2,  # task id -> minimum ingested files in the matter
+}
+
+
+def available_tasks(matter_file_count: int | None = None) -> list[TaskTemplate]:
+    """Templates in display order, filtered to those runnable in this context.
+
+    `matter_file_count` is the number of successfully-ingested files in the
+    matter, or None for the ad-hoc single-file path (where every matter-only
+    task is excluded)."""
+    out = []
+    for t in ordered_templates():
+        minimum = MATTER_ONLY_TASKS.get(t.id)
+        if minimum is not None:
+            if matter_file_count is None or matter_file_count < minimum:
+                continue
+        out.append(t)
+    return out
+
+
+def task_unavailable_reason(task_id: str, matter_file_count: int | None) -> str | None:
+    """A user-facing refusal message if `task_id` cannot run in this context, else
+    None. Server-side counterpart to `available_tasks` — the form hides the task,
+    this catches a POST that arrives anyway."""
+    minimum = MATTER_ONLY_TASKS.get(task_id)
+    if minimum is None:
+        return None
+    try:
+        label = get_template(task_id).label
+    except KeyError:
+        label = task_id
+    if matter_file_count is None:
+        return f"{label} runs across the documents in a matter and is not available for a single uploaded file."
+    if matter_file_count < minimum:
+        return f"{label} needs at least {minimum} ingested files in this matter; this matter has {matter_file_count}."
+    return None
 
 
 def templates_dir() -> Path:
@@ -340,13 +400,78 @@ def build_user_message(
         lines.append(c["text"])
         lines.append("")
     lines.append("REQUEST:")
-    lines.append(f"Task: {template.label}")
+    # Control inputs never enter the REQUEST section (see _request_lines).
+    lines.extend(_request_lines(template, structured_inputs))
+    return "\n".join(lines)
+
+
+def _request_lines(template: TaskTemplate, structured_inputs: dict) -> list[str]:
+    """The REQUEST section body, shared by both user-message builders so the two
+    cannot drift on which inputs reach the model. Control inputs are excluded."""
+    lines = [f"Task: {template.label}"]
     for field in template.inputs:
-        if field.control:          # control inputs never enter the REQUEST section
+        if field.control:
             continue
         val = structured_inputs.get(field.name)
         if not val:
             continue
         rendered = ", ".join(val) if isinstance(val, list) else str(val)
         lines.append(f"{field.label}: {rendered}")
+    return lines
+
+
+def build_comparison_user_message(
+    template: TaskTemplate,
+    structured_inputs: dict,
+    groups: list[tuple[str, list[dict]]],
+) -> str:
+    """User message for Compare Clauses: a FILE MANIFEST plus per-document
+    passage groups (Day 4c).
+
+    `build_user_message`'s flat CONTEXT list cannot express the fact this task is
+    built on — that a document was searched and yielded nothing. A file missing
+    from a flat list is indistinguishable from a file that was never looked at,
+    which is precisely the ambiguity the "Not present in this document" cell
+    exists to remove. So the manifest names every document up front (with its
+    passage count, including zero), and each document's passages sit under their
+    own header.
+
+    `groups` is ordered [(source_filename, [chunk dicts]), ...]; that order
+    becomes the comparison's column order. Chunk dicts carry the same
+    source/locator/text keys as `build_user_message`, so the per-passage
+    [SOURCE: ...] headers — and therefore the citation discipline — are
+    byte-identical to every other task."""
+    lines: list[str] = ["FILE MANIFEST", ""]
+    lines.append(
+        "Every document listed below was searched for the requested clause. The "
+        "comparison table must contain one column for each of them, in this order:"
+    )
+    for i, (source, chunks) in enumerate(groups, 1):
+        note = (
+            f"{len(chunks)} passage(s) retrieved"
+            if chunks
+            else "NO passages retrieved"
+        )
+        lines.append(f"{i}. {source} - {note}")
+    lines.append("")
+
+    lines.append("CONTEXT:")
+    lines.append("")
+    for source, chunks in groups:
+        lines.append(f"=== DOCUMENT: {source} ===")
+        lines.append("")
+        if not chunks:
+            lines.append(
+                "(no passages relevant to the requested clause were retrieved "
+                "from this document)"
+            )
+            lines.append("")
+            continue
+        for c in chunks:
+            lines.append(f"[SOURCE: {c['source']} {c['locator']}]")
+            lines.append(c["text"])
+            lines.append("")
+
+    lines.append("REQUEST:")
+    lines.extend(_request_lines(template, structured_inputs))
     return "\n".join(lines)

@@ -66,8 +66,10 @@
 {% endif %}
 
 <section class="block">
-  <h2>{% if is_pleading %}Pleading draft{% else %}Answer{% endif %}</h2>
-  <div class="answer">{{ answer_html|safe }}</div>
+  <h2>{% if is_pleading %}Pleading draft{% elif is_compare %}Comparison{% else %}Answer{% endif %}</h2>
+  {# `wide` lets a many-column comparison table scroll instead of being crushed  #}
+  {# to unreadable widths. Scoped to this task so every other table is unchanged. #}
+  <div class="answer{% if is_compare %} wide{% endif %}">{{ answer_html|safe }}</div>
 </section>
 
 {% if is_pleading %}<div class="banner draft">{{ draft_banner }}</div>{% endif %}
@@ -77,7 +79,10 @@
   {% if cross_document and retrieved_sources %}
   {# Honest provenance: which matter files actually grounded this answer.       #}
   {# Subdued, plain text — a transparency note, not a banner. Matter mode only. #}
-  <div style="color:#555;font-size:13px;margin:0 0 10px 0;">Drew on:
+  {# For Compare Clauses the label is "Compared across" and the list is every   #}
+  {# file SEARCHED, including any the model marked absent — a file checked and  #}
+  {# found to lack the clause is a finding the reader needs.                    #}
+  <div style="color:#555;font-size:13px;margin:0 0 10px 0;">{{ provenance_label or "Drew on" }}:
     {{ retrieved_sources|join(", ") }}</div>
   {% endif %}
   <ul class="citations">
@@ -90,7 +95,7 @@
 <section class="block">
   <h2>Run metadata</h2>
 <div class="metadata">model: {{ model }}
-retrieval: top-{{ top_k }} semantic ({{ embed_model }})
+retrieval: top-{{ top_k }} semantic{% if is_compare %} per file{% endif %} ({{ embed_model }})
 timestamp: {{ timestamp }}{% if pdf_sha256 %}
 pdf_sha256: {{ pdf_sha256 }}{% endif %}</div>
 </section>

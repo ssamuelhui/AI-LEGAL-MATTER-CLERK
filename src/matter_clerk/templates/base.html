@@ -47,6 +47,12 @@
     .answer th, .answer td { border: 1px solid #ccc; padding: 6px 10px; text-align: left;
                               vertical-align: top; }
     .answer th { background: #f6f6f6; }
+    /* Compare Clauses only: one column per document, so the table can exceed the
+       page width. Scroll it rather than crushing the columns. */
+    .answer.wide { overflow-x: auto; }
+    .answer.wide table { width: auto; min-width: 100%; }
+    .answer.wide th, .answer.wide td { min-width: 150px; }
+    .hint { color: #666; font-size: 13px; margin: 4px 0 8px 0; }
     .answer pre { background: #f6f6f6; padding: 10px; overflow-x: auto; border-radius: 4px; }
     .answer code { background: #f6f6f6; padding: 1px 4px; border-radius: 3px; font-size: 13px; }
     .answer blockquote { border-left: 3px solid #ddd; margin: 10px 0; padding: 2px 12px;
