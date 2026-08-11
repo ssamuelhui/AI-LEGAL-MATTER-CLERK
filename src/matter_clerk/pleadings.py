@@ -58,6 +58,33 @@ any way, note the following:**
    intentionally not filing-ready."""
 
 
+# The two gap markers the draft_pleading template instructs the model to emit
+# wherever the matter documents do not support a required element or fact. The
+# marker TEXT is template-owned (it is drafting guidance), but RECOGNISING one
+# is code-owned: Day-4d exports highlight every marker so a reviewer cannot skim
+# past an unfilled gap in a Word or PDF document that may be forwarded onward.
+# Non-greedy to the first closing bracket, DOTALL because a marker can wrap
+# across lines in the model's output.
+REQUIRED_MARKER = re.compile(
+    r"\[(?:ELEMENTS|ADDITIONAL MATERIAL) REQUIRED.*?\]", re.DOTALL
+)
+
+
+def split_required_markers(text: str) -> list[tuple[str, bool]]:
+    """Split prose into (fragment, is_marker) runs so a renderer can style the
+    markers distinctly. Returns [(text, False)] when there are none."""
+    out: list[tuple[str, bool]] = []
+    pos = 0
+    for m in REQUIRED_MARKER.finditer(text or ""):
+        if m.start() > pos:
+            out.append((text[pos : m.start()], False))
+        out.append((m.group(0), True))
+        pos = m.end()
+    if pos < len(text or ""):
+        out.append((text[pos:], False))
+    return out or [(text or "", False)]
+
+
 def role_for(pleading_type: str | None) -> str:
     """Derive party role from the pleading type (the 1-to-1 mapping the SoW's
     separate party_role field would otherwise duplicate)."""

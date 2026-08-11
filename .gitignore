@@ -38,6 +38,9 @@ Thumbs.db
 test-output/
 .pytest_cache/
 
+# Generated export files from verify_exports.py --keep (may embed matter text)
+tests/acceptance/_export_output/
+
 # User data (matters are confidential; never commit)
 data/matters/
 data/test_matter/

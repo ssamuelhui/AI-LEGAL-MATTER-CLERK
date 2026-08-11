@@ -13,6 +13,7 @@ from flask import (
     Flask,
     abort,
     flash,
+    make_response,
     redirect,
     render_template,
     request,
@@ -20,7 +21,7 @@ from flask import (
 )
 from werkzeug.serving import make_server
 
-from . import audit, matters, pipeline, pleadings
+from . import audit, export, matters, pipeline, pleadings
 from .prompts import (
     DEFAULT_TASK,
     available_tasks,
@@ -99,27 +100,51 @@ def _display_inputs(template, structured_inputs: dict) -> dict:
     return out
 
 
-def _render_result(result, template, task, structured_inputs, back_url, back_label):
+def _render_result(
+    result, template, task, structured_inputs, back_url, back_label, matter_name=None
+):
     """Render result.html. Shared by the ad-hoc and matter query paths; the only
     per-context difference is the back link."""
     is_pleading = task == "draft_pleading"
     is_compare = task == pipeline.COMPARE_TASK_ID
+    provenance_label = "Compared across" if is_compare else "Drew on"
+    party_role = (
+        pleadings.role_for(structured_inputs.get("pleading_type"))
+        if is_pleading
+        else None
+    )
+    request_summary = _display_inputs(template, structured_inputs)
+
+    # Day 4d: snapshot this result for export and hand the page its token. The
+    # entry lives ~30 minutes and is NOT consumed by an export, so a lawyer can
+    # take Word and then PDF from the same result page.
+    payload = export.build_payload(
+        result=result,
+        template=template,
+        task=task,
+        structured_inputs=structured_inputs,
+        request_summary=request_summary,
+        party_role=party_role,
+        provenance_label=provenance_label,
+        matter_name=matter_name,
+    )
+    export_token = export.store_result(payload)
+
     return render_template(
         "result.html",
         is_compare=is_compare,
+        export_token=export_token,
+        export_formats=export.list_export_formats(payload),
+        export_warnings=result.export_warnings,
         # "Drew on" asserts contribution, which is wrong for Compare Clauses:
         # its provenance list includes files that were searched and found to
         # lack the clause. That is a finding, so it gets honest wording.
-        provenance_label="Compared across" if is_compare else "Drew on",
+        provenance_label=provenance_label,
         back_url=back_url,
         back_label=back_label,
         task_label=template.label,
-        party_role=(
-            pleadings.role_for(structured_inputs.get("pleading_type"))
-            if is_pleading
-            else None
-        ),
-        request_summary=_display_inputs(template, structured_inputs),
+        party_role=party_role,
+        request_summary=request_summary,
         is_pleading=is_pleading,
         draft_banner=pleadings.DRAFT_BANNER if is_pleading else None,
         cover_note_html=(
@@ -501,9 +526,52 @@ def create_app() -> Flask:
                 result, template, task, structured_inputs,
                 back_url=url_for("matter_detail", matter_id=matter_id),
                 back_label="Back to matter",
+                matter_name=matters.get_matter(conn, matter_id).name,
             )
         finally:
             conn.close()
+
+    # ----------------------------------------------------------------------
+    # Export (Day 4d)
+    # ----------------------------------------------------------------------
+    @app.get("/export/<token>/<fmt>")
+    def export_result(token, fmt):
+        """Generate one file from a cached result.
+
+        The token identifies the task, so the format is the only other thing the
+        URL needs. An expired token is the COMMON case (30-minute TTL), not an
+        error condition, so it renders a short explanatory page with a 410
+        rather than a bare 404.
+        """
+        payload = export.get_result(token)
+        if payload is None:
+            return (
+                render_template("export_expired.html"),
+                410,
+            )
+        try:
+            data, mimetype, filename = export.generate(payload, fmt)
+        except export.UnsupportedFormat as e:
+            return render_template("export_error.html", message=str(e)), 400
+        except Exception as e:  # generation failure must not 500 opaquely
+            log.exception("Export generation failed")
+            return (
+                render_template(
+                    "export_error.html",
+                    message=f"The {fmt.upper()} file could not be generated: {e}",
+                ),
+                500,
+            )
+
+        response = make_response(data)
+        response.headers["Content-Type"] = mimetype
+        response.headers["Content-Disposition"] = (
+            f'attachment; filename="{filename}"'
+        )
+        response.headers["Content-Length"] = str(len(data))
+        # A matter document must not sit in a shared/proxy cache.
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     # ----------------------------------------------------------------------
     # Ad-hoc single-file path (today's behavior, preserved)

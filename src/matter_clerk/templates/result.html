@@ -74,6 +74,26 @@
 
 {% if is_pleading %}<div class="banner draft">{{ draft_banner }}</div>{% endif %}
 
+{# Export sits directly below the answer (and below the foot DRAFT banner for a  #}
+{# pleading, so the banner is never separated from the content it governs).      #}
+{# Plain links, so the token needs no hidden input or JS — it is in the href.    #}
+{% if export_token %}
+<section class="block">
+  <h2>Export</h2>
+  {% if export_warnings %}
+  {% for w in export_warnings %}<div class="banner warn">{{ w }}</div>{% endfor %}
+  {% endif %}
+  <div class="export-bar">
+    {% for fmt in export_formats %}
+    <a class="btn-export" href="{{ url_for('export_result', token=export_token, fmt=fmt) }}">
+      {% if fmt == 'docx' %}Export as Word{% elif fmt == 'pdf' %}Export as PDF{% else %}Export as Excel{% endif %}
+    </a>
+    {% endfor %}
+  </div>
+  <div class="hint">Downloads stay available for about 30 minutes; re-run the task after that.</div>
+</section>
+{% endif %}
+
 <section class="block">
   <h2>Citations</h2>
   {% if cross_document and retrieved_sources %}

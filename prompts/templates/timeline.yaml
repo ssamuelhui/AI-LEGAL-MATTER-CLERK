@@ -1,6 +1,6 @@
 id: timeline
 label: Timeline
-version: 1
+version: 2
 
 inputs:
   - name: question
@@ -44,3 +44,25 @@ system_prompt: |
   not fabricate events and do not infer dates that are not in the text. If the
   retrieved passages contain no dated events, say so in one sentence instead of
   emitting an empty table.
+
+  STRUCTURED OUTPUT (for export to Excel):
+
+  After the table — and only if you emitted a table — append one fenced JSON
+  block repeating exactly the same events, in the same order:
+
+  ```json
+  {"events": [
+    {"date": "...", "date_iso": "...", "event": "...",
+     "source": "...", "significance": "..."}
+  ]}
+  ```
+
+  - "date" must be character-identical to the Date cell, including any partial
+    date or note of ambiguity.
+  - "date_iso" is the ISO 8601 date (YYYY-MM-DD) and is included ONLY when the
+    document states a complete, unambiguous date. Omit it for a partial or
+    ambiguous date. Never infer a day or a month to fill it in.
+  - "event", "source" and "significance" must be character-identical to their
+    cells; use "" for an empty significance cell.
+  - The JSON must contain every row of the table and no rows that are not in
+    it. It is the same evidence in a second form, not a second answer.

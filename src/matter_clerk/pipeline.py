@@ -10,8 +10,9 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from . import audit, pleadings
+from . import audit, pleadings, structured
 from .citation import Citation
+from .structured import ComparisonTable, EntityCategory, TimelineRow
 from .embed import embed, embedding_dimension
 from .ingest import (
     EmailMetadata,
@@ -160,6 +161,16 @@ class PipelineResult(BaseModel):
     cross_document: bool = False
     retrieved_sources: list[str] = []
     retrieved_file_ids: list[int] = []
+    # Day 4d: structured intermediates for the three tabular tasks, carried
+    # alongside the markdown answer so exports do not have to parse legal
+    # content back out of model prose. None for every other task, and None when
+    # the model returned nothing valid (exports then fall back to the parser).
+    timeline_rows: Optional[list[TimelineRow]] = None
+    entity_categories: Optional[list[EntityCategory]] = None
+    comparison_table: Optional[ComparisonTable] = None
+    # Divergence between the structured data and the markdown table, surfaced to
+    # the user rather than silently resolved in favour of either.
+    export_warnings: list[str] = []
 
 
 class IngestOutcome(BaseModel):
@@ -445,6 +456,12 @@ def _answer_and_build(
         ]
     )
 
+    # Day 4d: for the tabular tasks the completion carries a trailing ```json
+    # block. Strip it before anything renders the answer (the web UI must look
+    # exactly as it did) and validate it into the structured intermediates.
+    # Non-tabular tasks pass through untouched.
+    answer, extracted = structured.extract(task, answer.strip())
+
     citations: list[Citation] = []
     seen: set[tuple[str, str]] = set()
     for c in retrieved:
@@ -466,8 +483,12 @@ def _answer_and_build(
 
     return PipelineResult(
         task=task,
-        answer=answer.strip(),
+        answer=answer,
         citations=citations,
+        timeline_rows=extracted.timeline_rows,
+        entity_categories=extracted.entity_categories,
+        comparison_table=extracted.comparison_table,
+        export_warnings=extracted.warnings,
         ocr_pages=ocr_pages or [],
         unreadable_pages=unreadable_pages or [],
         pleading_warnings=pleading_warnings,

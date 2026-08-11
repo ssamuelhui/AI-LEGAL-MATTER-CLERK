@@ -1,6 +1,6 @@
 id: find_entities
 label: Find Entities
-version: 1
+version: 2
 
 inputs:
   - name: categories
@@ -52,3 +52,24 @@ system_prompt: |
   do not add an address that is not written in the text). If a requested
   category has no entities in the retrieved passages, show the heading followed
   by one line: "None found in the retrieved passages."
+
+  STRUCTURED OUTPUT (for export to Excel):
+
+  After the last table, append one fenced JSON block repeating exactly the same
+  entities, with one object per category in the same order as the headings:
+
+  ```json
+  {"categories": [
+    {"name": "Parties", "note": "",
+     "rows": [{"entity": "...", "count": 1, "source": "..."}]}
+  ]}
+  ```
+
+  - "name" must match the category heading exactly.
+  - "entity", "count" and "source" must be character-identical to their cells.
+    Reproduce dollar amounts and dates character-for-character here too; do not
+    normalize or reformat them.
+  - For a category with no entities, give it an empty "rows" list and set
+    "note" to "None found in the retrieved passages."
+  - The JSON must contain every row of every table and no rows that are not in
+    them. It is the same evidence in a second form, not a second answer.

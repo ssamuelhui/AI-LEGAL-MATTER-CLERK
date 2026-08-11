@@ -1,6 +1,6 @@
 id: compare_clauses
 label: Compare Clauses
-version: 1
+version: 2
 
 inputs:
   - name: clauses_to_compare
@@ -99,3 +99,25 @@ system_prompt: |
       version is stronger, weaker, more favourable, riskier, or better drafted,
       and do not recommend which one to prefer. Setting the clauses side by side
       is the output; the analysis is the reader's to perform.
+
+  STRUCTURED OUTPUT (for export to Excel):
+
+  After the table — and only if you emitted a table — append one fenced JSON
+  block repeating exactly the same comparison:
+
+  ```json
+  {"files": ["DocumentA.pdf", "DocumentB.pdf"],
+   "rows": [
+     {"attribute": "Clause located at", "cells": ["s. 12.1 [DocumentA.pdf p.4]",
+                                                  "Not present in this document"]}
+   ]}
+  ```
+
+  - "files" lists the document column headers in the SAME order as the table,
+    copied character-exactly from the manifest.
+  - Each "cells" list has one entry per document, in that same order, and each
+    entry is character-identical to its table cell — including "Not stated",
+    "Not present in this document", and "-" fillers.
+  - "Clause located at" is the first row here as it is in the table.
+  - The JSON must contain every row of the table and no rows that are not in
+    it. It is the same evidence in a second form, not a second answer.

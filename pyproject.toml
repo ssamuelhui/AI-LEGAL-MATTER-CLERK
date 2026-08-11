@@ -21,6 +21,12 @@ dependencies = [
     "pytesseract>=0.3.10",
     "pdf2image>=1.17.0",
     "pyyaml>=6.0",
+    # Day 4d export formats. All three are pure Python (no system libraries) —
+    # deliberately so: WeasyPrint was evaluated and rejected because its Pango
+    # stack does not resolve on Windows without an msys2/GTK install.
+    "python-docx>=1.1",
+    "reportlab>=4.0",
+    "openpyxl>=3.1",
 ]
 
 [project.scripts]
