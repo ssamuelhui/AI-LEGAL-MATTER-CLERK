@@ -94,6 +94,118 @@ DETAILED_TIMELINE_INSTRUCTION = (
     "selection."
 )
 
+# --------------------------------------------------------------------------
+# Case discovery (Phase 2a) -- the first task that is NOT matter-only.
+#
+# SAFETY_PREAMBLE cannot be reused here. Its opening sentence states that no
+# external legal authority has been retrieved for this run, which is false for
+# this task: CanLII case METADATA has been retrieved. Reusing it would either
+# make the prompt lie about its own context or force a template author to weaken
+# the clause that exists precisely so it cannot be weakened.
+#
+# So this task gets its own code-owned, non-removable preamble with a different
+# and narrower danger to guard against. In matter-only mode the risk is the
+# model inventing authority. Here the risk is subtler and worse: real cases are
+# in the prompt, with real citations and real catchwords, and the model has
+# every cue it needs to describe what they HELD -- which it cannot know, because
+# CanLII's API does not return case text and never will. A confident sentence
+# about the holding of a real, correctly-cited case is the most believable
+# hallucination this system could produce.
+# --------------------------------------------------------------------------
+CASE_DISCOVERY_PREAMBLE = """\
+You are helping a Canadian lawyer DISCOVER cases worth reading. You are not \
+performing legal research and you are not analysing any case.
+
+You have been given, for each candidate case: its title, citation, court, \
+decision date, and CanLII's editorial catchwords and topic classification. \
+You have NOT been given the text of any case, the reasons for judgment, the \
+facts, the disposition, or the holding. You cannot obtain them. Write as \
+someone who has read a library catalogue entry, not the book.
+
+These rules are absolute:
+
+1. Never state what a case held, decided, found, ruled, ordered, or \
+established. Never describe its outcome or its reasoning.
+
+2. Never say that a case "supports", "confirms", "establishes", "is authority \
+for", "stands for", "applies to", "governs", or "is on point". You cannot \
+assess any of that without reading the case, and you have not read it.
+
+3. Never state whether a case is good law, or whether it has been followed, \
+overruled, distinguished, reversed, appealed, or considered.
+
+4. Never state the elements of a cause of action, the test for a remedy, the \
+requirements of a statute, or the content of a procedural rule -- neither from \
+these metadata nor from memory.
+
+5. Do not rank the cases, recommend any of them, say which is strongest or \
+most useful, or suggest which to read first. The ordering is not yours to make.
+
+6. Describe only the METADATA CONNECTION: what in this case's catchwords, \
+topic, court, or party description overlaps with the matter's legal concepts. \
+Name the specific overlapping term you relied on.
+
+7. Do not invent metadata. If a field says "(none published)", you may not \
+describe what the case is about from the case name or from memory.
+
+The lawyer will read each case on CanLII and form their own view. Your only \
+job is to say why the case surfaced."""
+
+# Ontario-specific vocabulary for query construction (approved design B).
+#
+# The tool is built for Ontario practice, and Ontario statutory names and forum
+# vocabulary measurably sharpen CanLII's relevance ranking -- "Condominium Act,
+# 1998" retrieves what "condominium legislation" does not. We do NOT have
+# equivalent domain knowledge for other provinces, so a non-Ontario run is
+# instructed to use general Canadian terminology rather than guess at
+# province-specific statute names it might get wrong.
+ONTARIO_VOCABULARY_NOTE = """\
+JURISDICTION-SPECIFIC VOCABULARY -- Ontario.
+
+This matter is an Ontario matter. Use Ontario statutory names, Ontario forum \
+names, and Ontario practice vocabulary in your queries wherever the matter \
+supports them, because CanLII's ranking responds strongly to exact statutory \
+titles. Where relevant, that vocabulary includes: the Condominium Act, 1998; \
+the Residential Tenancies Act, 2006; the Rules of Civil Procedure; the \
+Limitations Act, 2002; the Occupiers' Liability Act; the Construction Act; the \
+Employment Standards Act, 2000; the Human Rights Code; the Courts of Justice \
+Act; and the Business Corporations Act (Ontario). Ontario forums include the \
+Superior Court of Justice, the Divisional Court, the Court of Appeal for \
+Ontario, the Condominium Authority Tribunal, the Landlord and Tenant Board, \
+and the Human Rights Tribunal of Ontario.
+
+Name a statute ONLY if the matter documents or the research direction actually \
+engage it. Do not attach a statute to a query because it is on this list."""
+
+GENERAL_VOCABULARY_NOTE = """\
+JURISDICTION-SPECIFIC VOCABULARY -- not Ontario.
+
+This run is not scoped to Ontario, and you do not have reliable knowledge of \
+every province's statutory naming. Use GENERAL Canadian legal terminology -- \
+doctrines, causes of action, and common-law concepts -- rather than \
+province-specific statute titles, unless a statute is named explicitly in the \
+matter documents or in the research direction. A wrong statutory title \
+produces a confidently irrelevant search."""
+
+# The analytical angles a good discovery search covers. Code-owned so coverage
+# is structural rather than left to the model's judgment on the day. The model
+# is told to SKIP angles the matter does not support rather than pad to a quota:
+# a padded query returns confidently irrelevant cases, which costs the lawyer
+# more time than a missing angle does.
+QUERY_ANGLES = """\
+  doctrinal_core      The cause of action, duty, or legal test named in the
+                      research direction.
+  statutory_hook      A statute and section the matter documents actually
+                      engage. Emit up to two of these where the matter supports
+                      more than one provision.
+  factual_analogue    The fact pattern restated in the vocabulary a court would
+                      use, so that factually similar cases surface.
+  remedy              The relief or remedy in issue.
+  defence             The opposing party's likely answer or defence, so the
+                      lawyer sees the cases against them as well as for them.
+  forum_specific      The vocabulary of the specialised tribunal or court that
+                      hears this kind of dispute, where one exists."""
+
 _MATTER_PHRASES = {
     "this single\nlegal-matter document": "these matter documents",  # timeline (wrapped)
     "this single legal-matter document": "these matter documents",
@@ -146,13 +258,20 @@ class InputField(BaseModel):
     # values are file ids that the handler must authorize against the matter
     # exactly as it does `file_id`.
     type: Literal[
-        "text", "textarea", "multiselect", "select", "checkbox", "file_multiselect"
+        "text", "textarea", "multiselect", "select", "checkbox",
+        "file_multiselect", "number",
     ]
     label: str
     required: bool = False
     placeholder: Optional[str] = None
     options: Optional[list[str]] = None  # select / multiselect
     default: Optional[list[str]] = None  # multiselect only
+    # "number" only. The form enforces these client-side; the task's own code
+    # re-clamps server-side, because a min/max attribute is a hint and a POST
+    # can carry anything.
+    minimum: Optional[int] = None
+    maximum: Optional[int] = None
+    initial: Optional[int] = None
     show_when: Optional[ShowWhen] = None
     # A "control" input steers HOW the task runs (retrieval depth, prompt mode)
     # rather than supplying content. It still renders in the form and shows on
@@ -191,6 +310,7 @@ TASK_ORDER = [
     "find_facts",
     "find_entities",
     "compare_clauses",
+    "suggest_cases",
     "draft_memo",
     "draft_correspondence",
     "draft_pleading",
@@ -215,6 +335,12 @@ DEFAULT_TASK = "find_facts"
 # --------------------------------------------------------------------------
 MATTER_ONLY_TASKS: dict[str, int] = {
     "compare_clauses": 2,  # task id -> minimum ingested files in the matter
+    # Case discovery searches CanLII using concepts extracted from the matter's
+    # own documents. With no documents there is nothing to extract, and the task
+    # would degrade into a bare keyword search dressed up as matter-aware
+    # research. One file is the honest minimum. Listing it here also keeps it
+    # out of the CLI for free: cli.py offers available_tasks(None).
+    "suggest_cases": 1,
 }
 
 
@@ -418,6 +544,134 @@ def _request_lines(template: TaskTemplate, structured_inputs: dict) -> list[str]
         rendered = ", ".join(val) if isinstance(val, list) else str(val)
         lines.append(f"{field.label}: {rendered}")
     return lines
+
+
+def build_concept_extraction_prompt(jurisdiction: str) -> str:
+    """System prompt for LLM call 1 of case discovery: matter passages plus a
+    research direction -> de-identified legal concepts and CanLII queries.
+
+    The CONFIDENTIALITY rules here are the load-bearing part. This is the only
+    call in the task that sees matter text, and its output is what travels to a
+    third party (CanLII). Everything downstream is scrubbed in code as well
+    (`discovery.scrub_query`), because a prompt is an instruction and not a
+    guarantee -- but the instruction comes first and is explicit about why.
+
+    The QUERY SYNTAX rules encode what the live API actually does, which is not
+    what its parameter names suggest: terms are OR-ed, AND/OR/NOT are treated as
+    ordinary search words rather than operators, and quoted phrases measurably
+    sharpen the ranking. See matter_clerk.canlii for the verification log."""
+    vocabulary = (
+        ONTARIO_VOCABULARY_NOTE
+        if jurisdiction == "Ontario"
+        else GENERAL_VOCABULARY_NOTE
+    )
+    return f"""\
+You build case-law search queries for a Canadian lawyer. You are given passages
+from the lawyer's own matter documents and their research direction. Your output
+is a set of search queries for CanLII, plus a de-identified summary of the
+matter's legal shape.
+
+CONFIDENTIALITY -- the queries you produce are transmitted to CanLII, a third
+party. The matter documents are privileged. Therefore:
+
+  * Never put a party name, person's name, company name, address, unit or suite
+    number, file or docket number, dollar amount, or specific date into a query
+    or into any concept field.
+  * Queries and concepts contain LEGAL VOCABULARY ONLY: doctrines, causes of
+    action, statutory titles and section numbers, remedies, and the fact pattern
+    described in the abstract ("water escape from a common element pipe", not
+    "the leak in unit 315").
+  * Statutory years are legal vocabulary and must be kept: "Condominium Act,
+    1998" is the statute's name.
+
+QUERY SYNTAX -- CanLII's search behaves as follows, which is not always what its
+documentation implies:
+
+  * Terms are OR-ed and results are relevance-ranked. A longer query is a
+    broader query, not a narrower one.
+  * AND, OR and NOT are NOT operators. They are matched as ordinary words and
+    make results worse. Never use them.
+  * "Quoted phrases" DO sharpen the ranking substantially. Build each query
+    around one or two quoted phrases plus three to six bare discriminating
+    terms.
+  * Aim for six to twelve words per query.
+
+{vocabulary}
+
+ANGLES -- produce at most one query per angle, in this order:
+
+{QUERY_ANGLES}
+
+Emit between {MIN_QUERY_HINT} and {MAX_QUERY_HINT} queries. SKIP any angle the
+matter and research direction do not genuinely support. Do not pad to a quota:
+an invented angle returns confidently irrelevant cases and costs the lawyer more
+time than a missing angle does.
+
+OUTPUT -- return exactly one fenced JSON block and nothing else:
+
+```json
+{{
+  "legal_issues": ["short noun phrases naming the legal issues in play"],
+  "statutes": ["statutes or rules the DOCUMENTS engage, with section numbers"],
+  "forum": "the court or tribunal that would hear this, if evident",
+  "party_types": ["generic roles, e.g. condominium corporation, unit owner"],
+  "fact_pattern": "one sentence, abstract legal vocabulary, no identifiers",
+  "queries": [
+    {{"angle": "doctrinal_core",
+      "query": "\\"duty to repair\\" \\"common elements\\" condominium corporation liability",
+      "rationale": "one short sentence on what this query is looking for"}}
+  ]
+}}
+```"""
+
+
+def build_case_note_prompt() -> str:
+    """System prompt for LLM call 2: the preliminary 'why this surfaced' notes.
+
+    Prepends the code-owned CASE_DISCOVERY_PREAMBLE, which is what makes the
+    no-holding-claims rule non-removable in the same literal sense as
+    SAFETY_PREAMBLE: it does not live in any template file, so no template edit
+    can weaken it."""
+    return f"""{CASE_DISCOVERY_PREAMBLE}
+
+TASK: For each candidate case, write ONE sentence explaining why its metadata
+connects to this matter.
+
+Each sentence must:
+  * name the specific catchword, topic, statute, forum, or party type that
+    overlaps with the matter's concepts;
+  * be phrased as an observation about the METADATA, not about the case. Write
+    "its catchwords cover X", not "it deals with X"; write "CanLII files it
+    under Y", not "it decided Y";
+  * stay under 45 words.
+
+If a case's metadata gives no honest basis for a connection, write exactly:
+
+    Metadata gives no clear connection - surfaced by the "<angle>" search.
+
+substituting the angle named for that case.
+
+Never state or imply what any case held. If you find yourself about to write
+what a case decided, you have exceeded what the metadata supports: describe the
+catchword overlap instead.
+
+OUTPUT -- return exactly one fenced JSON block and nothing else. Include one
+entry for EVERY candidate case, with the citation copied character-exactly from
+the input so it can be matched back:
+
+```json
+{{"notes": [
+  {{"citation": "2020 ONCA 471 (CanLII)",
+    "note": "Its catchwords cover exclusive-use common elements and maintenance and repair obligations, the same subject matter as this matter's declaration dispute."}}
+]}}
+```"""
+
+
+# Kept in sync with discovery.MIN_QUERIES / MAX_QUERIES. Duplicated as plain
+# ints rather than imported because prompts.py must not import discovery.py
+# (discovery imports prompts); the pair is asserted in the discovery tests.
+MIN_QUERY_HINT = 5
+MAX_QUERY_HINT = 10
 
 
 def build_comparison_user_message(

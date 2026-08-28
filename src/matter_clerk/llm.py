@@ -31,6 +31,13 @@ class LLMClient:
         self._client = OpenAI(api_key=self.api_key, base_url=base_url)
 
     def complete(self, messages: list[dict]) -> str:
+        # Deliberately no max_tokens. The default provider (MiMo Pro) is a
+        # reasoning model whose hidden reasoning tokens are charged against
+        # max_tokens, so a limit that looks generous starves the visible
+        # output instead of bounding it: Phase-2a measured a 2,500-token cap
+        # truncating a completion to 872 characters, where the same prompt
+        # with no cap returned a complete 2,783-character block. Callers that
+        # need structurally complete output handle truncation on their side.
         response = self._client.chat.completions.create(
             model=self.model,
             messages=messages,

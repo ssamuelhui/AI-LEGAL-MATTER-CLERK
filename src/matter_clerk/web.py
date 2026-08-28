@@ -21,7 +21,7 @@ from flask import (
 )
 from werkzeug.serving import make_server
 
-from . import audit, export, matters, pipeline, pleadings
+from . import audit, canlii, discovery, export, matters, pipeline, pleadings
 from .prompts import (
     DEFAULT_TASK,
     available_tasks,
@@ -362,6 +362,16 @@ def create_app() -> Flask:
                 return render_matter_detail(
                     conn, matter_id, status=400, error=unavailable, **common
                 )
+            # Case discovery searches CanLII with concepts drawn from the whole
+            # matter. Restricting it to one file is a contradiction the form
+            # already hides; this catches a POST that arrives anyway.
+            if task == discovery.TASK_ID and file_id_raw:
+                return render_matter_detail(
+                    conn, matter_id, status=400,
+                    error="Suggest Relevant Cases draws on the whole matter. "
+                          "Clear the single-file restriction and run it again.",
+                    **common
+                )
             if task == pipeline.COMPARE_TASK_ID and file_id_raw:
                 return render_matter_detail(
                     conn, matter_id, status=400,
@@ -473,6 +483,25 @@ def create_app() -> Flask:
                         collection=mf.collection,  # pinned -> single-collection
                         matter_id=matter_id,       # -> audit log
                     )
+                elif task == discovery.TASK_ID:
+                    # Structurally distinct from every other task: it returns a
+                    # CaseDiscoveryResult (a shortlist of external cases), not a
+                    # PipelineResult (a grounded answer over matter documents),
+                    # so it renders its own page and returns early rather than
+                    # falling through to _render_result.
+                    disc = discovery.run_case_discovery(
+                        files=files,
+                        matter_id=matter_id,
+                        matter_name=matters.get_matter(conn, matter_id).name,
+                        structured_inputs=structured_inputs,
+                    )
+                    matters.touch_last_queried(conn, matter_id)
+                    return render_template(
+                        "case_discovery.html",
+                        result=disc,
+                        back_url=url_for("matter_detail", matter_id=matter_id),
+                        back_label="Back to matter",
+                    )
                 elif task == pipeline.COMPARE_TASK_ID:
                     result = pipeline.run_compare_clauses(
                         files=files,
@@ -491,6 +520,30 @@ def create_app() -> Flask:
             except pipeline.CompareClausesNotApplicable as e:
                 return render_matter_detail(
                     conn, matter_id, status=400, error=str(e), **common
+                )
+            # CanLII failures are refusals with a specific cause, never opaque
+            # 500s: the lawyer needs to know whether to fix a key, wait out a
+            # rate limit, or rephrase the question.
+            except canlii.CanLIIAuthError as e:
+                return render_matter_detail(
+                    conn, matter_id, status=503, error=str(e), **common
+                )
+            except canlii.CanLIIBudgetExceeded as e:
+                return render_matter_detail(
+                    conn, matter_id, status=429, error=str(e), **common
+                )
+            except canlii.CanLIIThrottled as e:
+                return render_matter_detail(
+                    conn, matter_id, status=429,
+                    error=f"{e} Wait a moment and run the task again.", **common
+                )
+            except canlii.CanLIIUnavailable as e:
+                return render_matter_detail(
+                    conn, matter_id, status=503, error=str(e), **common
+                )
+            except discovery.CaseDiscoveryError as e:
+                return render_matter_detail(
+                    conn, matter_id, status=422, error=str(e), **common
                 )
             except pipeline.QdrantUnreachable as e:
                 return render_matter_detail(

@@ -21,6 +21,10 @@ dependencies = [
     "pytesseract>=0.3.10",
     "pdf2image>=1.17.0",
     "pyyaml>=6.0",
+    # Phase 2a: the CanLII client. Declared explicitly rather than relied on as
+    # a transitive dependency of sentence-transformers — matter_clerk.canlii
+    # imports it directly.
+    "requests>=2.31",
     # Day 4d export formats. All three are pure Python (no system libraries) —
     # deliberately so: WeasyPrint was evaluated and rejected because its Pango
     # stack does not resolve on Windows without an msys2/GTK install.

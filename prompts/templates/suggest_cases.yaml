@@ -1,0 +1,84 @@
+id: suggest_cases
+label: Suggest Relevant Cases
+version: 1
+
+# --------------------------------------------------------------------------
+# This template is shaped differently from the other eight, and deliberately so.
+#
+# Every other task's `system_prompt` is the instruction that produces the
+# lawyer's answer. This task produces no answer: it produces a SHORTLIST of real
+# cases for the lawyer to go and read. Its two model calls (concept/query
+# extraction, and the preliminary "why this surfaced" notes) are both driven by
+# code-owned prompts in matter_clerk.prompts, for the same reason SAFETY_PREAMBLE
+# lives in code — the rule that the tool must never claim to know what a case
+# held is a correctness rule, not a presentation preference, and a template
+# author must not be able to weaken it.
+#
+# What remains here is what genuinely belongs to a template: the task's label,
+# its user inputs, and the seed used to retrieve matter context.
+# --------------------------------------------------------------------------
+
+inputs:
+  - name: research_direction
+    type: textarea
+    required: true
+    label: Research direction
+    placeholder: "What do you want to research? e.g. 'corporate liability for common element failures' or 'a landlord's repair obligations where a tenant withholds access'."
+
+  - name: jurisdiction
+    type: select
+    required: false
+    control: true
+    label: Jurisdiction
+    # Ontario first in the list is NOT the default — "All Canada" is, so a
+    # lawyer who does not think about this field gets the widest honest search
+    # rather than a silently narrowed one. Ontario is the default JURISDICTION
+    # for ranking purposes (SoW 4.3.1); that is a different question from how
+    # wide to cast the net.
+    options:
+      - All Canada
+      - Ontario
+      - Federal
+
+  - name: max_cases
+    type: number
+    required: false
+    control: true
+    label: Maximum cases to return
+    minimum: 1
+    maximum: 25
+    initial: 15
+
+  - name: date_range_years
+    type: number
+    required: false
+    control: true
+    label: Cases from the last N years
+    minimum: 1
+    maximum: 50
+    initial: 10
+
+# Seed for the LOCAL matter retrieval only — this text never reaches CanLII.
+# It steers which passages of the matter are read when extracting the legal
+# concepts, biasing retrieval toward the parts of the file that carry legal
+# substance rather than logistics.
+retrieval_query: >-
+  legal issue dispute obligation liability breach statute section rule
+  entitlement remedy claim defence
+
+# Depth of that local retrieval. Higher than most tasks because it costs no
+# CanLII calls and the extracted concepts are only as good as the context they
+# come from. matter_clerk.discovery.MATTER_TOP_K is the operative value.
+top_k: 14
+
+# Never sent to a model. Present because TaskTemplate requires it, and used as
+# the on-screen description of what the task does.
+system_prompt: |
+  Search CanLII for real Canadian cases the lawyer may want to read, using the
+  legal concepts present in this matter's documents together with the research
+  direction they supply.
+
+  This task discovers cases. It does not read them. CanLII's API returns case
+  metadata — names, citations, courts, dates, and editorial catchwords — and
+  never the text of a decision, so the tool cannot and does not report what any
+  case held. The lawyer reads each case on CanLII and forms their own view.

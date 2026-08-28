@@ -1,0 +1,221 @@
+{% extends "base.html" %}
+{% block subtitle %} &middot; Suggested cases{% endblock %}
+{% block content %}
+<nav><a href="{{ back_url }}">&larr; {{ back_label }}</a></nav>
+
+{# ---------------------------------------------------------------------- #}
+{# The disclaimer is the first thing on the page, above the results, in the #}
+{# strongest banner style the app has, and it is not collapsible. A lawyer   #}
+{# who reads nothing else must still read this: the whole failure mode of a  #}
+{# case shortlist is that it looks like it was checked.                      #}
+{# ---------------------------------------------------------------------- #}
+<div class="banner discovery-warning">
+  <strong>These are suggested cases, not legal research.</strong>
+  They were matched on CanLII metadata and editorial catchwords.
+  <strong>This tool has not read any of these cases</strong> &mdash; CanLII&rsquo;s
+  API returns case names, citations, courts, dates and catchwords, never the text
+  of a decision. You must read each case on CanLII yourself to determine whether
+  it is relevant, what it decided, and whether it is still good law.
+</div>
+
+{% if result.has_out_of_jurisdiction %}
+<div class="banner warn">
+  Some results below are from outside Ontario. They are
+  <strong>persuasive only &mdash; no Ontario authority located on this point</strong>
+  by this search. That is a statement about this search, not about the law.
+</div>
+{% endif %}
+
+{% for w in result.warnings %}
+<div class="banner warn">{{ w }}</div>
+{% endfor %}
+
+{% if result.budget_warning %}
+<div class="banner info">{{ result.budget_warning }}</div>
+{% endif %}
+
+<section class="block">
+  <h2>Request</h2>
+  <div class="question">{{ result.research_direction }}</div>
+  <div class="hint" style="margin-top:8px;">
+    Matter: <strong>{{ result.matter_name }}</strong> &middot;
+    Jurisdiction: <strong>{{ result.jurisdiction }}</strong> &middot;
+    Last <strong>{{ result.date_range_years }}</strong> years &middot;
+    Showing up to <strong>{{ result.max_cases }}</strong> cases
+  </div>
+</section>
+
+{# ---------------------------------------------------------------------- #}
+{# The funnel. A shortlist without its denominator is an assertion; with it, #}
+{# it is evidence. The lawyer can see how hard the narrowing was and judge    #}
+{# whether the search was too tight or too loose.                            #}
+{# ---------------------------------------------------------------------- #}
+<section class="block">
+  <h2>How this list was narrowed</h2>
+  <div class="funnel">
+    <span><strong>{{ result.funnel.queries_executed }}</strong> queries</span>
+    <span>&rarr;</span>
+    <span><strong>{{ result.funnel.raw_hits }}</strong> hits</span>
+    <span>&rarr;</span>
+    <span><strong>{{ result.funnel.unique_cases }}</strong> unique cases</span>
+    <span>&rarr;</span>
+    <span><strong>{{ result.funnel.after_filters }}</strong> after filters</span>
+    <span>&rarr;</span>
+    <span><strong>{{ result.funnel.enriched }}</strong> enriched</span>
+    <span>&rarr;</span>
+    <span><strong>{{ result.funnel.shown }}</strong> shown</span>
+  </div>
+  {% if result.funnel.broadened %}
+  <div class="hint">The targeted queries returned few cases, so broadened
+    versions were also run. Both sets are listed below.</div>
+  {% endif %}
+  {% if result.funnel.used_browse_fallback %}
+  <div class="hint">No keyword search matched, so recent decisions of the
+    relevant courts were listed instead. Those results are not
+    relevance-ranked.</div>
+  {% endif %}
+
+  <details>
+    <summary>The {{ result.queries|length }} queries sent to CanLII (and the
+      matter concepts they were built from)</summary>
+    <div class="hint">
+      Only legal concepts are sent to CanLII &mdash; never party names,
+      addresses, unit numbers, amounts, dates, or document text. These are the
+      exact strings that left this machine.
+    </div>
+    {% if result.concepts.summary_lines() %}
+    <div class="metadata">{% for line in result.concepts.summary_lines() %}{{ line }}
+{% endfor %}</div>
+    {% endif %}
+    <ol class="queries">
+      {% for q in result.queries %}
+      <li>
+        <span class="angle">{{ q.angle }}</span>
+        <code>{{ q.query }}</code>
+        {% if q.rationale %}<div class="hint">{{ q.rationale }}</div>{% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+  </details>
+</section>
+
+<section class="block">
+  <h2>{{ result.cases|length }} suggested case{{ '' if result.cases|length == 1 else 's' }}
+    &mdash; ranked by court authority, jurisdiction, and metadata match</h2>
+
+  {% for rc in result.cases %}
+  <article class="case-card">
+    <div class="case-rank">{{ loop.index }}</div>
+    <div class="case-body">
+      <h3><a href="{{ rc.case.url }}" target="_blank" rel="noopener">{{ rc.case.title }}</a></h3>
+      <div class="case-cite">{{ rc.case.citation }}</div>
+      <div class="case-meta">
+        {{ rc.case.court.name }}
+        &middot; {{ rc.case.display_date }}
+        {% if rc.case.docket_number %}&middot; Docket {{ rc.case.docket_number }}{% endif %}
+      </div>
+      <span class="badge tier-{{ rc.case.court.tier }}">{{ rc.case.court.binding_label }}</span>
+
+      {# The note's heading carries the caveat, so the caveat cannot be #}
+      {# separated from the sentence it qualifies by skim-reading.       #}
+      <div class="why">
+        <div class="why-label">
+          Why this surfaced &mdash; from CanLII metadata only; the tool has not
+          read this case{% if rc.note_is_fallback %} (assembled from catchwords,
+          not model-written){% endif %}
+        </div>
+        <div class="why-text">{{ rc.note }}</div>
+      </div>
+
+      {% if rc.case.keywords %}
+      <details class="catchwords">
+        <summary>CanLII catchwords</summary>
+        <div class="metadata">{{ rc.case.keywords }}</div>
+      </details>
+      {% endif %}
+      <div class="case-foot">
+        {% if rc.case.topics %}<span>Topic: {{ rc.case.topics }}</span>{% endif %}
+        <span>Found by: {{ rc.case.found_by|join(', ') }}</span>
+        {% if rc.case.metadata_error %}
+        <span class="meta-warn">Full metadata unavailable &mdash; verify on CanLII</span>
+        {% endif %}
+      </div>
+
+      <a class="btn-canlii" href="{{ rc.case.url }}" target="_blank" rel="noopener">
+        Read this case on CanLII &rarr; <span class="url">{{ rc.case.url }}</span>
+      </a>
+    </div>
+  </article>
+  {% endfor %}
+</section>
+
+<section class="block">
+  <h2>Run details</h2>
+  <div class="metadata">Model (concepts + notes): {{ result.model }}
+CanLII API calls: {{ result.canlii_calls }}
+Timestamp (UTC): {{ result.timestamp }}
+Case text retrieved: none - CanLII's API does not provide it</div>
+</section>
+
+<style>
+  .banner.discovery-warning {
+    background: #fff4e5; border: 2px solid #d97706; color: #6b3a00;
+    font-size: 15px; line-height: 1.55; padding: 14px 16px;
+  }
+  .funnel { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+            font-size: 13px; color: #444; background: #fafafa;
+            padding: 10px 12px; border-radius: 4px; }
+  .funnel strong { color: #111; }
+  ol.queries { padding-left: 20px; margin: 10px 0 0 0; }
+  ol.queries li { margin: 10px 0; }
+  ol.queries code { display: block; background: #f6f6f6; padding: 6px 8px;
+                    border-radius: 3px; font-size: 13px; margin-top: 3px;
+                    word-break: break-word; }
+  .angle { display: inline-block; font-size: 11px; letter-spacing: .06em;
+           text-transform: uppercase; color: #555; background: #eee;
+           padding: 2px 7px; border-radius: 3px; }
+
+  .case-card { display: flex; gap: 14px; border: 1px solid #ddd;
+               border-radius: 6px; padding: 14px 16px; margin-bottom: 14px;
+               background: #fff; }
+  .case-rank { flex: 0 0 28px; font-size: 18px; font-weight: 700; color: #999;
+               text-align: right; }
+  .case-body { flex: 1; min-width: 0; }
+  .case-card h3 { font-size: 16px; margin: 0 0 2px 0; line-height: 1.35; }
+  .case-card h3 a { color: #1f6feb; text-decoration: none; }
+  .case-card h3 a:hover { text-decoration: underline; }
+  .case-cite { font-family: ui-monospace, Menlo, Consolas, monospace;
+               font-size: 13px; color: #333; }
+  .case-meta { font-size: 13px; color: #666; margin-top: 2px; }
+
+  .badge { display: inline-block; margin-top: 7px; font-size: 11px;
+           font-weight: 600; letter-spacing: .04em; padding: 3px 8px;
+           border-radius: 3px; background: #eee; color: #444; }
+  .badge.tier-1, .badge.tier-2 { background: #dcefdc; color: #1d5c1d; }
+  .badge.tier-3 { background: #e6f0dc; color: #2c5c1d; }
+  .badge.tier-4, .badge.tier-7 { background: #e7f3ff; color: #1a3f6b; }
+  .badge.tier-5, .badge.tier-6 { background: #ede7f6; color: #40308a; }
+  .badge.tier-8 { background: #fff3cd; color: #6a4a00; }
+  .badge.tier-9, .badge.tier-10, .badge.tier-11 { background: #f0f0f0; color: #555; }
+
+  .why { margin-top: 10px; border-left: 3px solid #d97706; padding: 2px 0 2px 10px; }
+  .why-label { font-size: 11px; letter-spacing: .03em; text-transform: uppercase;
+               color: #8a5a00; font-weight: 700; }
+  .why-text { font-size: 14px; color: #333; margin-top: 3px; }
+
+  .catchwords { margin-top: 8px; }
+  .catchwords .metadata { font-size: 12px; }
+  .case-foot { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px;
+               font-size: 12px; color: #777; }
+  .case-foot .meta-warn { color: #8a1f1f; }
+
+  .btn-canlii { display: block; margin-top: 11px; background: #1f6feb;
+                color: #fff; text-decoration: none; padding: 9px 14px;
+                border-radius: 4px; font-size: 14px; font-weight: 600;
+                text-align: center; }
+  .btn-canlii:hover { background: #1a5fd0; }
+  .btn-canlii .url { display: block; font-weight: 400; font-size: 12px;
+                     opacity: .85; font-family: ui-monospace, Consolas, monospace;
+                     margin-top: 2px; word-break: break-all; }
+</style>
+{% endblock %}

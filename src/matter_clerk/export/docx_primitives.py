@@ -15,7 +15,7 @@ from docx.shared import Inches, Pt, RGBColor
 
 from .. import pleadings
 from .mdblocks import inline_runs
-from .payload import ExportPayload
+from .payload import PROPERTY_LIMIT, ExportPayload
 from .tables import ExportTable
 
 DRAFT_RED = RGBColor(0x7A, 0x00, 0x00)
@@ -89,22 +89,40 @@ def apply_base_styles(doc) -> None:
         section.top_margin = section.bottom_margin = Inches(0.9)
 
 
+def _prop(text: str) -> str:
+    """Clamp text to the OOXML core-property limit.
+
+    python-docx raises on any property over 255 characters, which turns an
+    export into a failed download. Every property write goes through here so no
+    caller-supplied string — a matter name, a task label — can do that again.
+    """
+    text = str(text)
+    if len(text) <= PROPERTY_LIMIT:
+        return text
+    return text[: PROPERTY_LIMIT - 3].rstrip() + "..."
+
+
 def set_core_properties(doc, payload: ExportPayload) -> None:
     """Document properties. For a pleading these assert DRAFT status in the
     file's own metadata, so it reads as a draft in a file browser or a document
-    management system before anyone opens it."""
+    management system before anyone opens it.
+
+    Comments carries the SHORT attribution only. The full one names every source
+    file and blows the 255-character property limit on any real matter; it is
+    written to the page footer instead, where it is visible on every page.
+    """
     cp = doc.core_properties
     cp.author = "Matter Clerk (automated draft)"
-    cp.comments = payload.attribution()
+    cp.comments = _prop(payload.short_attribution())
     if payload.is_pleading:
-        cp.title = f"DRAFT - NOT FOR FILING - {payload.task_label}"
+        cp.title = _prop(f"DRAFT - NOT FOR FILING - {payload.task_label}")
         cp.subject = (
             "DRAFT pleading - not reviewed by counsel - not for filing or service"
         )
         cp.category = "DRAFT"
     else:
-        cp.title = payload.task_label
-        cp.subject = f"Matter Clerk - {payload.task_label}"
+        cp.title = _prop(payload.task_label)
+        cp.subject = _prop(f"Matter Clerk - {payload.task_label}")
 
 
 # --------------------------------------------------------------------------

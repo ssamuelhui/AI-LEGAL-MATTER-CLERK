@@ -306,6 +306,46 @@ def _draw_watermark(canv, page_w: float, page_h: float) -> None:
     canv.restoreState()
 
 
+# The PDF footer is drawn, not flowed: it gets a fixed number of lines before
+# it would collide with the body frame. Word has no such constraint, so only
+# this format ever elides the file list.
+MAX_FOOTER_LINES = 4
+
+
+def _wrap(canv, text: str, avail: float) -> list[str]:
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        trial = f"{current} {word}".strip()
+        if canv.stringWidth(trial, "Helvetica", 7) <= avail or not current:
+            current = trial
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _fit_attribution(canv, payload: ExportPayload, avail: float) -> list[str]:
+    """The attribution, wrapped to at most MAX_FOOTER_LINES lines.
+
+    Previously the wrapped text was simply cut at three lines, which silently
+    dropped the trailing "Model: ..." sentence on any matter with a long file
+    list — the footer then made a provenance claim it did not finish. Instead,
+    shorten the FILE LIST until the whole line fits, so the date and the model
+    always survive and the reader is told how many files were elided.
+    """
+    lines = _wrap(canv, payload.attribution(), avail)
+    if len(lines) <= MAX_FOOTER_LINES:
+        return lines
+    for max_files in range(len(payload.source_files) - 1, 0, -1):
+        lines = _wrap(canv, payload.attribution(max_files=max_files), avail)
+        if len(lines) <= MAX_FOOTER_LINES:
+            return lines
+    return lines[:MAX_FOOTER_LINES]
+
+
 def _draw_footer(canv, doc, payload: ExportPayload, page_w: float) -> None:
     canv.saveState()
     y = 0.58 * inch
@@ -321,21 +361,9 @@ def _draw_footer(canv, doc, payload: ExportPayload, page_w: float) -> None:
     canv.setFillColor(MUTED)
     canv.setFont("Helvetica", 7)
     avail = page_w - 2.4 * inch  # leave room for the page number at the right
-    words = payload.attribution().split()
-    lines: list[str] = []
-    current = ""
-    for word in words:
-        trial = f"{current} {word}".strip()
-        if canv.stringWidth(trial, "Helvetica", 7) <= avail:
-            current = trial
-        else:
-            if current:
-                lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
+    lines = _fit_attribution(canv, payload, avail)
 
-    for line in lines[:3]:
+    for line in lines:
         canv.drawCentredString(page_w / 2, y, line)
         y -= 8.5
 
@@ -365,10 +393,13 @@ def make_doc(buffer, payload: ExportPayload, *, use_landscape: bool = False):
         bottomMargin=0.95 * inch,
         title=title,
         author="Matter Clerk (automated draft)",
+        # Short attribution only, matching Word: PDF metadata has no 255-char
+        # limit of its own, but the two formats must agree about what a
+        # property field says, and a file list belongs in the footer.
         subject=(
             "DRAFT pleading - not reviewed by counsel - not for filing or service"
             if payload.is_pleading
-            else payload.attribution()
+            else payload.short_attribution()
         ),
     )
 

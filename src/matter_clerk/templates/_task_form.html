@@ -138,6 +138,13 @@
                  placeholder="{{ f.placeholder or '' }}"
                  value="{{ values.get(f.name) if is_active else '' }}"
                  {% if f.required %}data-required="1"{% endif %}>
+        {% elif f.type == "number" %}
+          {# min/max/value are convenience only: the task re-clamps server-side. #}
+          <input id="{{ t.id }}_{{ f.name }}" name="{{ f.name }}" type="number"
+                 {% if f.minimum is not none %}min="{{ f.minimum }}"{% endif %}
+                 {% if f.maximum is not none %}max="{{ f.maximum }}"{% endif %}
+                 value="{{ values.get(f.name) if is_active and values.get(f.name) else (f.initial if f.initial is not none else '') }}"
+                 {% if f.required %}data-required="1"{% endif %}>
         {% elif f.type == "select" %}
           <select id="{{ t.id }}_{{ f.name }}" name="{{ f.name }}"
                   {% if f.required %}data-required="1"{% endif %}>
@@ -267,15 +274,18 @@
           ok = updateCompareGate(g);
         }
       });
-      // Comparing across documents and restricting to one file are mutually
-      // exclusive; hide + disable the picker so it cannot submit a file_id.
+      // Some tasks are inherently whole-matter: comparing across documents, and
+      // discovering cases from the matter's overall legal shape. Restricting
+      // either to one file is a contradiction, so hide + disable the picker so
+      // it cannot submit a file_id. Both are re-checked server-side.
       if (restrictFile) {
-        var isCompare = chosen === "compare_clauses";
-        restrictFile.hidden = isCompare;
+        var wholeMatter = chosen === "compare_clauses" ||
+                          chosen === "suggest_cases";
+        restrictFile.hidden = wholeMatter;
         var sel = restrictFile.querySelector("select");
         if (sel) {
-          if (isCompare) sel.value = "";
-          sel.disabled = isCompare;
+          if (wholeMatter) sel.value = "";
+          sel.disabled = wholeMatter;
         }
       }
       if (submitBtn) submitBtn.disabled = !ok;
