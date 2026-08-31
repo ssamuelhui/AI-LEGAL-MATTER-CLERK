@@ -14,7 +14,7 @@ sent to CanLII are recorded verbatim in the audit log.
 
 Pipeline, in order:
 
-  1. Retrieve matter passages locally (Qdrant, never leaves the machine).
+  1. Retrieve matter passages locally (embedded store, never leaves the machine).
   2. LLM call 1  -- passages + research direction -> legal CONCEPTS + a set of
      targeted CanLII queries, one per analytical angle.
   3. Scrub the queries. Matter content must not travel to CanLII.
@@ -303,14 +303,14 @@ def _matter_passages(
     """Retrieve matter passages relevant to the research direction.
 
     Reuses the Day-4b scatter-gather so this task sees the matter the same way
-    every other cross-document task does. Purely local -- Qdrant and the
+    every other cross-document task does. Purely local -- the vector store and the
     embedding model both run on this machine."""
     if not files:
         raise NoMatterContext("This matter has no ingested files.")
     template = get_template(TASK_ID)
     seed = f"{template.retrieval_query} {research_direction}".strip()
     query_vec = embed([seed], model_name=embed_model)[0]
-    client = connect_qdrant()
+    client = connect()
     scored = search_across_collections(
         client, [f.collection for f in files], query_vec, MATTER_TOP_K
     )
@@ -319,12 +319,6 @@ def _matter_passages(
             "No passages could be retrieved from this matter's documents."
         )
     return [f"[{sc.source} {sc.locator}]\n{sc.text}" for sc in scored]
-
-
-def connect_qdrant():
-    host = os.environ.get("QDRANT_HOST", "localhost")
-    port = int(os.environ.get("QDRANT_PORT", "6333"))
-    return connect(host, port)
 
 
 # --------------------------------------------------------------------------

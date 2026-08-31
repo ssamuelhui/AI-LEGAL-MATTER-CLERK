@@ -93,7 +93,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--collection",
         type=str,
         default=None,
-        help="Qdrant collection name (default: derived from PDF hash).",
+        help="Collection name (default: derived from file hash).",
     )
     p.add_argument(
         "--reindex",
@@ -165,7 +165,8 @@ def _add_file_to_matter(conn, matter: matters.Matter, file_path: Path) -> matter
     stored.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(file_path, stored)
     try:
-        pipeline.ingest_file(stored, file_path.name, collection=coll)
+        pipeline.ingest_file(stored, file_path.name, collection=coll,
+                             matter_id=matter.id)
         matters.mark_file_ingested(conn, row.id)
     except Exception as e:
         matters.mark_file_failed(conn, row.id, str(e))
@@ -260,7 +261,7 @@ def _matter_main(argv: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    # qdrant-client logs every request via httpx at INFO ("HTTP Request: GET
+    # chromadb and httpx log at INFO ("HTTP Request: GET
     # ... 200 OK"); quiet it to WARNING so successful calls are silent but
     # failures still surface. Matches web.main().
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -305,9 +306,10 @@ def main(argv: list[str] | None = None) -> int:
             reindex=args.reindex,
             collection=args.collection,
         )
-    except pipeline.QdrantUnreachable as e:
+    except pipeline.VectorStoreUnreachable as e:
         sys.exit(
-            f"ERROR: Qdrant unreachable. Run `docker compose up -d` and retry. ({e})"
+            f"ERROR: the local vector store could not be opened. "
+            f"Check that the data directory is writable. ({e})"
         )
     except pipeline.PdfHasNoText as e:
         sys.exit(f"ERROR: {e}")

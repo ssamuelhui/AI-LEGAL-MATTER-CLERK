@@ -32,7 +32,7 @@ from .prompts import (
     missing_required_inputs,
     task_unavailable_reason,
 )
-from .vectorstore import connect, file_hash
+from .vectorstore import file_hash, store_ok
 
 log = logging.getLogger("matter_clerk.web")
 
@@ -87,15 +87,13 @@ def decorate_verification_markers(html: str) -> str:
     )
 
 
-def _qdrant_ok() -> tuple[bool, str | None]:
-    try:
-        host = os.environ.get("QDRANT_HOST", "localhost")
-        port = int(os.environ.get("QDRANT_PORT", "6333"))
-        client = connect(host, port)
-        client.get_collections()
-        return True, None
-    except Exception as e:
-        return False, str(e)
+def _store_ok() -> tuple[bool, str | None]:
+    """Is the local vector store openable?
+
+    Phase 3: this used to ping Qdrant over HTTP. The embedded store has no
+    daemon, so the only failure modes left are filesystem ones — a path that is
+    not writable, a corrupt directory, or another process holding it.""" 
+    return store_ok()
 
 
 def _collect_web_inputs(template, form) -> dict:
@@ -218,9 +216,9 @@ def create_app() -> Flask:
     # Render helpers (kept inside create_app so url_for is available)
     # ----------------------------------------------------------------------
     def render_ad_hoc(status=200, **kw):
-        ok, err = _qdrant_ok()
+        ok, err = _store_ok()
         defaults = dict(
-            qdrant_ok=ok, qdrant_err=err, error=None,
+            store_ok=ok, store_err=err, error=None,
             # Matter-only tasks (Compare Clauses) never appear on the ad-hoc form.
             tasks=available_tasks(None), selected_task=DEFAULT_TASK,
             values={}, top_k="", reindex=False, limitation_signals=None,
@@ -233,9 +231,9 @@ def create_app() -> Flask:
         matter = matters.get_matter(conn, matter_id)
         files = matters.list_files(conn, matter_id)
         queryable = [f for f in files if f.ingest_status == "ingested"]
-        ok, err = _qdrant_ok()
+        ok, err = _store_ok()
         defaults = dict(
-            qdrant_ok=ok, qdrant_err=err, error=None,
+            store_ok=ok, store_err=err, error=None,
             matter=matter, files=files,
             queryable_files=queryable, matter_files=queryable,
             # Compare Clauses appears only once the matter holds 2+ ingested files.
@@ -282,7 +280,8 @@ def create_app() -> Flask:
             shutil.move(str(tmp_path), str(stored))
             tmp_path = None  # moved into the store; nothing left to clean up
             try:
-                pipeline.ingest_file(stored, filename, collection=coll)
+                pipeline.ingest_file(stored, filename, collection=coll,
+                                     matter_id=matter.id)
                 matters.mark_file_ingested(conn, row.id)
                 flash(f"Added {filename}.", "ok")
             except Exception as e:
@@ -302,9 +301,9 @@ def create_app() -> Flask:
             ms = matters.list_matters(conn)
         finally:
             conn.close()
-        ok, err = _qdrant_ok()
+        ok, err = _store_ok()
         return render_template(
-            "matters.html", matters=ms, qdrant_ok=ok, qdrant_err=err, error=None
+            "matters.html", matters=ms, store_ok=ok, store_err=err, error=None
         )
 
     @app.post("/matters/new")
@@ -585,10 +584,10 @@ def create_app() -> Flask:
                 return render_matter_detail(
                     conn, matter_id, status=422, error=str(e), **common
                 )
-            except pipeline.QdrantUnreachable as e:
+            except pipeline.VectorStoreUnreachable as e:
                 return render_matter_detail(
                     conn, matter_id, status=503,
-                    qdrant_ok=False, qdrant_err=str(e), **common
+                    store_ok=False, store_err=str(e), **common
                 )
             except pipeline.PdfHasNoText as e:
                 return render_matter_detail(
@@ -741,8 +740,8 @@ def create_app() -> Flask:
                     reindex=reindex,
                     # matter_id defaults to None -> audit records null for ad-hoc.
                 )
-            except pipeline.QdrantUnreachable as e:
-                return render_ad_hoc(status=503, qdrant_ok=False, qdrant_err=str(e), **common)
+            except pipeline.VectorStoreUnreachable as e:
+                return render_ad_hoc(status=503, store_ok=False, store_err=str(e), **common)
             except pipeline.PdfHasNoText as e:
                 return render_ad_hoc(status=422, error=str(e), **common)
             except pipeline.LimitationReviewRequired as e:
@@ -761,11 +760,11 @@ def create_app() -> Flask:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
-    # qdrant-client issues every request through httpx, whose INFO logger prints
-    # "HTTP Request: GET http://localhost:6333/... 200 OK" for each call — demo
-    # noise. Quiet it to WARNING so successful calls are silent but failures
-    # still surface.
+    # Phase 3: Qdrant's httpx chatter is gone with Qdrant, but chromadb and the
+    # HF hub still log at INFO. Quiet them so successful calls are silent and
+    # failures still surface.
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("chromadb").setLevel(logging.WARNING)
     load_dotenv()
 
     host = "127.0.0.1"

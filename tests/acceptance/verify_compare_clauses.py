@@ -1,6 +1,6 @@
 """Offline verification for Compare Clauses (Day 4c).
 
-Runs the real `pipeline.run_compare_clauses` with Qdrant and the LLM stubbed, so
+Runs the real `pipeline.run_compare_clauses` with the store and the LLM stubbed, so
 the logic that matters — per-file grouping, the absent-file path, provenance
 covering files that contributed nothing, the retrieval budget, and the file-count
 refusals — is checkable without Docker or an API key.
@@ -59,10 +59,13 @@ class FakeLLM:
 
 
 def install_stubs(hits_by_collection: dict[str, int]) -> None:
-    """Stub Qdrant + embeddings + the LLM. `hits_by_collection` says how many
-    passages each collection returns; 0 means the file yielded nothing."""
-    pipeline.connect = lambda host, port: object()
-    pipeline._precheck_qdrant = lambda client: None
+    """Stub the vector store + embeddings + the LLM. `hits_by_collection` says
+    how many passages each collection returns; 0 means the file yielded nothing.
+
+    Phase 3: `connect` lost its (host, port) arguments with the move to the
+    embedded store, and `_precheck_qdrant` was renamed `_precheck_store`."""
+    pipeline.connect = lambda *a, **kw: object()
+    pipeline._precheck_store = lambda client: None
     pipeline.embed = lambda texts, model_name=None: [[0.0] * 384 for _ in texts]
     pipeline.LLMClient = FakeLLM
 

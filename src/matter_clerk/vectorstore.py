@@ -1,13 +1,53 @@
+"""Vector storage and retrieval.
+
+Phase 3: this module was ported from Qdrant to **ChromaDB in embedded mode**.
+The reason is deployment, not capability — Qdrant needs a Docker daemon, and the
+tool is being installed on Ontario lawyers' Windows laptops where Docker is
+frequently prohibited by IT policy, breaks on update, and adds ~500MB the user
+has to manage. ChromaDB's PersistentClient is an in-process store over a local
+directory: no daemon, no ports, nothing to start before querying.
+
+WHAT THIS MODULE GUARANTEES TO ITS CALLERS
+------------------------------------------
+`ScoredChunk.score` is a cosine SIMILARITY in [0, 1] where **higher is more
+similar**, exactly as it was under Qdrant. This is the single most important
+invariant here and it is not free: Qdrant's cosine distance returns a
+similarity, whereas Chroma returns a cosine *distance* where LOWER is better.
+Porting the ranking code literally would have silently inverted every result —
+retrieval would still "work", no error would be raised anywhere, and the tool
+would hand the model the least relevant passages in the matter. `_to_similarity`
+converts at the boundary so that every caller, every sort, and every score
+threshold above this module keeps the meaning it already had.
+
+Cosine is also set EXPLICITLY (`configuration={"hnsw": {"space": "cosine"}}`);
+Chroma's default space is L2. Because `embed()` normalises vectors, L2 and
+cosine happen to rank identically today — but that is a coincidence of the
+current embedding model, not a property we should depend on.
+"""
+
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+import chromadb
+from chromadb.api import ClientAPI
 
 from .ingest import Chunk
+
+# Chroma's HNSW index is configured per collection at creation time. Kept here
+# rather than inline so every collection this module creates is provably
+# configured the same way.
+_COLLECTION_CONFIG = {"hnsw": {"space": "cosine"}}
+
+# Chroma requires collection names of 3-512 chars from [a-zA-Z0-9._-], starting
+# and ending alphanumeric. Both of our schemes satisfy this by construction
+# ("day1-<sha16>" = 21 chars, "m<id>-<sha16>" >= 19), so the naming scheme
+# carried over from Qdrant unchanged — which is what makes an existing
+# collection name still mean the same thing after the port.
+_MIN_NAME_LEN = 3
 
 
 @dataclass
@@ -18,14 +58,24 @@ class ScoredChunk:
     hit must remember its origin collection — that's how the caller maps it back
     to a matter file_id (for the audit log and the "Drew on" label). `source` is
     the human filename from the payload and is what already drives citations;
-    `collection` is the machine identity. Single-collection search does not need
-    this and keeps returning raw Qdrant points."""
+    `collection` is the machine identity.
+
+    `score` is a cosine similarity, higher-is-better (see module docstring)."""
 
     collection: str
     score: float
     source: str
     locator: str
     text: str
+
+
+class VectorStoreUnavailable(RuntimeError):
+    """The local vector store could not be opened.
+
+    Replaces Phase-1's QdrantUnreachable. The failure modes are entirely
+    different now — not "the daemon is down" but "this path is not writable",
+    "the directory is corrupt", or "another process holds it" — so the callers
+    that report this to a lawyer need to say something a lawyer can act on."""
 
 
 def file_hash(path: Path) -> str:
@@ -40,49 +90,266 @@ def default_collection_name(pdf_path: Path) -> str:
     return f"day1-{file_hash(pdf_path)[:16]}"
 
 
-def connect(host: str, port: int) -> QdrantClient:
-    return QdrantClient(host=host, port=port)
+def chunk_id(content_sha256: str, chunk_index: int, text: str) -> str:
+    """Deterministic id for one chunk.
+
+    Derived from (file content hash, position, leading text) so that
+    re-ingesting identical content produces identical ids. That makes a re-index
+    idempotent rather than duplicative, and means an id is reproducible across
+    machines — useful when a lawyer reports "the memo cited p.4" and we need to
+    find the exact stored chunk.
+
+    `text[:200]` rather than the whole chunk: enough to distinguish two chunks
+    that share a position after a chunker change, cheap on very large chunks."""
+    h = hashlib.sha256()
+    h.update(content_sha256.encode("utf-8"))
+    h.update(str(chunk_index).encode("utf-8"))
+    h.update(text[:200].encode("utf-8"))
+    return h.hexdigest()
 
 
-def collection_exists(client: QdrantClient, name: str) -> bool:
-    return client.collection_exists(name)
+# --------------------------------------------------------------------------
+# Client lifecycle
+#
+# One process-wide PersistentClient, created lazily and cached. Chroma is an
+# EMBEDDED store: the client owns the directory rather than talking to a server,
+# so there is nothing to close and no connection to drop — the SQLite metadata
+# and the HNSW index are flushed on write. `connect()` is therefore cheap to
+# call repeatedly, which matters because the pipeline calls it once per request.
+#
+# The trade this makes, and it is a real one: Qdrant was a server, so the web
+# app and the CLI could both talk to it at the same time. An embedded store is
+# owned by ONE process. Multiple THREADS are fine (the Flask server is threaded
+# and Chroma serialises internally), but running the CLI against the same path
+# while the web app is up is not supported. Documented in MIGRATION.md.
+# --------------------------------------------------------------------------
+_CLIENT: ClientAPI | None = None
+_CLIENT_PATH: str | None = None
 
 
-def recreate_collection(client: QdrantClient, name: str, dim: int) -> None:
-    if client.collection_exists(name):
+def default_store_path() -> Path:
+    """Where the vector store lives: $CHROMA_DB_PATH, else <repo>/data/chroma."""
+    env = os.environ.get("CHROMA_DB_PATH")
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parents[2] / "data" / "chroma"
+
+
+def connect(path: str | Path | None = None) -> ClientAPI:
+    """Open (or reuse) the embedded store.
+
+    Signature change from Phase 1's `connect(host, port)`: an embedded store has
+    no host and no port. Callers pass nothing and get the configured path."""
+    global _CLIENT, _CLIENT_PATH
+    target = str(Path(path) if path is not None else default_store_path())
+    if _CLIENT is not None and _CLIENT_PATH == target:
+        return _CLIENT
+    try:
+        Path(target).mkdir(parents=True, exist_ok=True)
+        _CLIENT = chromadb.PersistentClient(path=target)
+        _CLIENT_PATH = target
+    except Exception as e:
+        raise VectorStoreUnavailable(f"{target}: {e}") from e
+    return _CLIENT
+
+
+def reset_client() -> None:
+    """Drop the cached client. For tests that switch store paths."""
+    global _CLIENT, _CLIENT_PATH
+    _CLIENT = None
+    _CLIENT_PATH = None
+
+
+def store_ok(path: str | Path | None = None) -> tuple[bool, str | None]:
+    """Health check for the UI: can we open the store and list collections?
+
+    Replaces Phase-1's `_qdrant_ok`. Note that Chroma's client has
+    `list_collections()` and NOT `get_collections()` — the old probe would have
+    raised AttributeError here and been reported to the lawyer as a dead
+    database, so this could not simply be left pointing at the new client."""
+    try:
+        client = connect(path)
+        client.list_collections()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+# --------------------------------------------------------------------------
+# Collections
+# --------------------------------------------------------------------------
+def _get(client: ClientAPI, name: str):
+    """Fetch a collection, or None if it does not exist.
+
+    `embedding_function=None` on every access: we always supply our own vectors
+    (see `upsert_chunks`), and leaving it unset makes Chroma attach its
+    DefaultEmbeddingFunction, which downloads an ONNX all-MiniLM-L6-v2 model on
+    first use. For an offline Windows installer that is both a surprise network
+    fetch and a second, unused embedding model in the bundle."""
+    try:
+        return client.get_collection(name, embedding_function=None)
+    except Exception:
+        return None
+
+
+def collection_exists(client: ClientAPI, name: str) -> bool:
+    return _get(client, name) is not None
+
+
+def recreate_collection(
+    client: ClientAPI,
+    name: str,
+    dim: int,
+    metadata: dict | None = None,
+) -> None:
+    """Drop and recreate `name` as an empty cosine collection.
+
+    `dim` is no longer declared to the store — Chroma infers dimensionality from
+    the first vectors written — but it is still accepted and recorded in the
+    collection metadata, so a later embed-model swap that changes the dimension
+    is visible rather than silent."""
+    if len(name) < _MIN_NAME_LEN:
+        raise ValueError(
+            f"collection name {name!r} is shorter than Chroma's {_MIN_NAME_LEN}-"
+            f"character minimum"
+        )
+    if _get(client, name) is not None:
         client.delete_collection(name)
+    meta = {"dim": int(dim), **(metadata or {})}
+    # Chroma metadata values must be str/int/float/bool — drop anything else
+    # (notably None, which is how an ad-hoc file's absent matter_id arrives).
+    meta = {k: v for k, v in meta.items() if isinstance(v, (str, int, float, bool))}
     client.create_collection(
-        collection_name=name,
-        vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+        name=name,
+        embedding_function=None,
+        configuration=_COLLECTION_CONFIG,
+        metadata=meta,
     )
+
+
+def delete_collection(client: ClientAPI, name: str) -> bool:
+    """Delete a collection. Returns False if it did not exist.
+
+    Not called anywhere yet — deleting a matter file currently orphans its
+    collection, which is a pre-existing gap unrelated to this port. Exposed here
+    so that gap can be closed without reopening the store layer."""
+    if _get(client, name) is None:
+        return False
+    client.delete_collection(name)
+    return True
 
 
 def upsert_chunks(
-    client: QdrantClient,
+    client: ClientAPI,
     name: str,
     chunks: list[Chunk],
     vectors: list[list[float]],
+    content_sha256: str = "",
+    matter_id: int | None = None,
 ) -> None:
-    points = [
-        PointStruct(
-            id=i,
-            vector=vec,
-            payload={"source": c.source, "locator": c.locator, "text": c.text},
-        )
-        for i, (c, vec) in enumerate(zip(chunks, vectors))
-    ]
-    client.upsert(collection_name=name, points=points)
+    """Write chunks + their vectors.
 
+    Payload mapping from Qdrant to Chroma: the chunk TEXT becomes Chroma's
+    `documents`, and `source` / `locator` become `metadatas`. Same three fields,
+    same values, verbatim.
 
-def search(client: QdrantClient, name: str, query_vec: list[float], top_k: int):
-    result = client.query_points(
-        collection_name=name, query=query_vec, limit=top_k, with_payload=True
+    `locator` in particular is stored and returned untouched. It is the field
+    that carries citation semantics ("p.3", "p.5 (OCR)", "from Kevin Oskoui,
+    2024-05-11"), and page number and OCR status are encoded IN it rather than
+    stored as separate columns — deliberately, so there is exactly one source of
+    truth for what a citation says. Splitting them out here would mean parsing a
+    format this layer should not know about, and would not survive emails, whose
+    locators carry no page at all."""
+    if not chunks:
+        return
+    col = _get(client, name)
+    if col is None:
+        raise VectorStoreUnavailable(f"collection {name!r} does not exist")
+    ids = [chunk_id(content_sha256, i, c.text) for i, c in enumerate(chunks)]
+    metadatas: list[dict] = []
+    for i, c in enumerate(chunks):
+        m: dict = {
+            "source": c.source,
+            "locator": c.locator,
+            "chunk_index": i,
+            "content_sha256": content_sha256,
+        }
+        if matter_id is not None:
+            m["matter_id"] = int(matter_id)
+        metadatas.append(m)
+    col.add(
+        ids=ids,
+        embeddings=vectors,
+        documents=[c.text for c in chunks],
+        metadatas=metadatas,
     )
-    return result.points
+
+
+# --------------------------------------------------------------------------
+# Retrieval
+# --------------------------------------------------------------------------
+def _to_similarity(distance: float) -> float:
+    """Chroma cosine distance -> Qdrant-equivalent cosine similarity.
+
+    Verified against Chroma 1.5.9: an identical vector returns distance 0.0 and
+    an orthogonal one returns 1.0, so `1 - d` yields 1.0 and 0.0 respectively —
+    exactly the values Qdrant's COSINE distance returned. See the module
+    docstring for why getting this backwards would have failed silently."""
+    return 1.0 - float(distance)
+
+
+def _rows(name: str, result: dict) -> list[ScoredChunk]:
+    """Flatten one Chroma query result into ScoredChunks.
+
+    Chroma returns column-oriented lists nested one level per query vector; we
+    always send exactly one, so everything is index [0]. A collection that holds
+    fewer than n_results chunks simply returns fewer — no padding, no error."""
+    ids = (result.get("ids") or [[]])[0]
+    docs = (result.get("documents") or [[]])[0]
+    metas = (result.get("metadatas") or [[]])[0]
+    dists = (result.get("distances") or [[]])[0]
+    out: list[ScoredChunk] = []
+    for i in range(len(ids)):
+        meta = metas[i] or {}
+        out.append(
+            ScoredChunk(
+                collection=name,
+                score=_to_similarity(dists[i]),
+                source=str(meta.get("source", "")),
+                locator=str(meta.get("locator", "")),
+                text=docs[i] or "",
+            )
+        )
+    return out
+
+
+def _query(client: ClientAPI, name: str, query_vec: list[float], top_k: int):
+    col = _get(client, name)
+    if col is None:
+        raise VectorStoreUnavailable(f"collection {name!r} does not exist")
+    return col.query(
+        query_embeddings=[query_vec],
+        n_results=top_k,
+        include=["documents", "metadatas", "distances"],
+    )
+
+
+def search(
+    client: ClientAPI, name: str, query_vec: list[float], top_k: int
+) -> list[ScoredChunk]:
+    """Top-k from one collection, best first.
+
+    RETURN TYPE CHANGED in the Chroma port. This used to hand back raw Qdrant
+    point objects and the caller reached into `p.payload["source"]` — a vendor
+    type leaking two layers up into `pipeline.run_query`. It now returns
+    ScoredChunk like its two siblings already did, so no Qdrant-shaped object
+    survives anywhere above this module and the next store swap is a one-file
+    change for real."""
+    return _rows(name, _query(client, name, query_vec, top_k))
 
 
 def search_across_collections(
-    client: QdrantClient,
+    client: ClientAPI,
     collections: list[str],
     query_vec: list[float],
     top_k: int,
@@ -100,27 +367,19 @@ def search_across_collections(
     files the matter holds.
 
     `collections` should be the (already-ingested) per-file collections of the
-    matter. An empty list yields an empty result."""
+    matter. An empty list yields an empty result.
+
+    The descending sort is only correct because `_to_similarity` has already
+    flipped Chroma's distance into a similarity."""
     merged: list[ScoredChunk] = []
     for name in collections:
-        for p in client.query_points(
-            collection_name=name, query=query_vec, limit=top_k, with_payload=True
-        ).points:
-            merged.append(
-                ScoredChunk(
-                    collection=name,
-                    score=p.score,
-                    source=p.payload["source"],
-                    locator=p.payload["locator"],
-                    text=p.payload["text"],
-                )
-            )
+        merged.extend(_rows(name, _query(client, name, query_vec, top_k)))
     merged.sort(key=lambda c: c.score, reverse=True)
     return merged[:top_k]
 
 
 def retrieve_per_file_by_query(
-    client: QdrantClient,
+    client: ClientAPI,
     collections: list[str],
     query_vec: list[float],
     top_k: int,
@@ -147,41 +406,36 @@ def retrieve_per_file_by_query(
     chunks returned is `top_k * len(collections)`; the caller owns that budget.
     A failing collection propagates rather than being skipped — same reasoning
     as `search_across_collections`: a silent gap in a legal retrieval is worse
-    than a loud failure."""
+    than a loud failure.
+
+    Both properties are ours, not Chroma's, and are preserved by construction:
+    the dict is built by iterating `collections` in order."""
     out: dict[str, list[ScoredChunk]] = {}
     for name in collections:
-        hits = client.query_points(
-            collection_name=name, query=query_vec, limit=top_k, with_payload=True
-        ).points
-        out[name] = [
-            ScoredChunk(
-                collection=name,
-                score=p.score,
-                source=p.payload["source"],
-                locator=p.payload["locator"],
-                text=p.payload["text"],
-            )
-            for p in hits
-        ]
+        out[name] = _rows(name, _query(client, name, query_vec, top_k))
     return out
 
 
-def all_chunks(client: QdrantClient, name: str, batch: int = 256) -> list[str]:
+def all_chunks(client: ClientAPI, name: str, batch: int = 256) -> list[str]:
     """Return the text of every chunk in a collection (no vectors).
 
     Used by the pleading limitation scan, which must see the whole document,
-    not just the top-k retrieved for the drafting query."""
+    not just the top-k retrieved for the drafting query.
+
+    Chroma's `get` paginates by limit/offset rather than Qdrant's opaque cursor,
+    but the batching is kept: the limitation scan runs over whole matters and
+    pulling every chunk of every file in one call is the one place this layer
+    could plausibly blow up memory on a large matter."""
+    col = _get(client, name)
+    if col is None:
+        raise VectorStoreUnavailable(f"collection {name!r} does not exist")
     texts: list[str] = []
-    offset = None
+    offset = 0
     while True:
-        points, offset = client.scroll(
-            collection_name=name,
-            with_payload=True,
-            with_vectors=False,
-            limit=batch,
-            offset=offset,
-        )
-        texts.extend(p.payload.get("text", "") for p in points)
-        if offset is None:
+        got = col.get(include=["documents"], limit=batch, offset=offset)
+        docs = got.get("documents") or []
+        texts.extend(d or "" for d in docs)
+        if len(docs) < batch:
             break
+        offset += batch
     return texts

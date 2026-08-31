@@ -34,6 +34,7 @@ from .prompts import (
     get_template,
 )
 from .vectorstore import (
+    VectorStoreUnavailable,
     all_chunks,
     collection_exists,
     connect,
@@ -43,6 +44,7 @@ from .vectorstore import (
     retrieve_per_file_by_query,
     search,
     search_across_collections,
+    store_ok,
     upsert_chunks,
 )
 
@@ -91,8 +93,17 @@ COMPARE_TOTAL_CHUNK_BUDGET = 40
 COMPARE_MIN_PER_FILE_TOP_K = 3
 
 
-class QdrantUnreachable(RuntimeError):
-    """Raised when Qdrant is not reachable at the configured host/port."""
+class VectorStoreUnreachable(RuntimeError):
+    """Raised when the local vector store cannot be opened.
+
+    Phase 3: was QdrantUnreachable. The old name is kept as an alias below
+    because it is caught by name in web.py and cli.py, and a rename that
+    silently stops matching an except clause would turn a clear error page into
+    an unhandled 500."""
+
+
+# Back-compat alias (see above).
+QdrantUnreachable = VectorStoreUnreachable
 
 
 class PdfHasNoText(RuntimeError):
@@ -200,20 +211,31 @@ class IngestOutcome(BaseModel):
     attachment_warnings: list[str] = []
 
 
-def _config() -> tuple[str, int, str, str]:
-    """(qdrant_host, qdrant_port, embed_model, llm_model) from the environment."""
-    host = os.environ.get("QDRANT_HOST", "localhost")
-    port = int(os.environ.get("QDRANT_PORT", "6333"))
+def _config() -> tuple[str, str]:
+    """(embed_model, llm_model) from the environment.
+
+    Phase 3: the Qdrant host/port pair is gone — the store is a local directory
+    resolved by `vectorstore.default_store_path()` (CHROMA_DB_PATH, else
+    data/chroma). Nothing about the embedding or LLM configuration changed."""
     embed_model = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
     model = os.environ.get("MODEL", "xiaomi/mimo-v2.5-pro")
-    return host, port, embed_model, model
+    return embed_model, model
 
 
-def _precheck_qdrant(client) -> None:
-    try:
-        client.get_collections()
-    except Exception as e:
-        raise QdrantUnreachable(str(e))
+def _precheck_store(client) -> None:
+    """Fail fast with a clear error if the store cannot be read.
+
+    Chroma's client exposes `list_collections()`, NOT Qdrant's
+    `get_collections()`, so this probe had to change with the port — left
+    pointing at the old method it would have raised AttributeError on every
+    request and reported a healthy store as unreachable."""
+    ok, err = store_ok()
+    if not ok:
+        raise VectorStoreUnreachable(err or "vector store unavailable")
+
+
+# Back-compat alias: the compare-clauses acceptance test monkeypatches this.
+_precheck_qdrant = _precheck_store
 
 
 def ingest_file(
@@ -221,8 +243,14 @@ def ingest_file(
     source_name: str,
     collection: str | None = None,
     reindex: bool = False,
+    matter_id: int | None = None,
 ) -> IngestOutcome:
-    """Ingest one PDF or .eml into a Qdrant collection (or reuse a cached one).
+    """Ingest one PDF or .eml into a vector-store collection (or reuse a cached one).
+
+    `matter_id` is recorded in the collection and chunk metadata only — it does
+    not affect retrieval or the collection name (which already encodes the
+    matter). It is provenance: it makes a store directory self-describing, so
+    an orphaned collection can be traced back to the matter it came from.
 
     `collection` pins the target name; when None it derives the ad-hoc
     content-hash name (`default_collection_name`). The matter path passes the
@@ -231,9 +259,9 @@ def ingest_file(
     every call (even a cache hit) because the result page surfaces them. Raises
     PdfHasNoText when there is nothing to index.
     """
-    host, port, embed_model, _model = _config()
-    client = connect(host, port)
-    _precheck_qdrant(client)
+    embed_model, _model = _config()
+    client = connect()
+    _precheck_store(client)
 
     is_email = path.suffix.lower() == ".eml"
     coll = collection or default_collection_name(path)
@@ -269,8 +297,27 @@ def ingest_file(
             chunks = chunk_pages(pages, source=source_name, ocr_pages=ocr_pages)
         log.info(f"Embedding {len(chunks)} chunks with {embed_model} ...")
         vectors = embed([c.text for c in chunks], model_name=embed_model)
-        recreate_collection(client, coll, dim=embedding_dimension(embed_model))
-        upsert_chunks(client, coll, chunks, vectors)
+        # Phase 3: the content hash is now written into every chunk id and into
+        # the collection metadata. Chunk ids are derived from it (see
+        # vectorstore.chunk_id), which is what makes re-ingesting identical
+        # content idempotent instead of duplicative.
+        content_sha = file_hash(path)
+        recreate_collection(
+            client,
+            coll,
+            dim=embedding_dimension(embed_model),
+            metadata={
+                "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "source_filename": source_name,
+                "content_sha256": content_sha,
+                "embed_model": embed_model,
+                **({"matter_id": matter_id} if matter_id is not None else {}),
+            },
+        )
+        upsert_chunks(
+            client, coll, chunks, vectors,
+            content_sha256=content_sha, matter_id=matter_id,
+        )
         chunk_count = len(chunks)
         log.info(f"Indexed into collection: {coll}")
     else:
@@ -322,30 +369,28 @@ def run_query(
 
     resolved_top_k = top_k if top_k is not None else template.top_k
 
-    host, port, embed_model, model = _config()
+    embed_model, model = _config()
 
     # Ingest (or reuse the cached collection). For a matter file the caller
     # passes its persisted `collection`, so this is a no-op cache hit and only
     # the email metadata gets re-parsed for the result page.
     outcome = ingest_file(
-        pdf_path, source_name, collection=collection, reindex=reindex
+        pdf_path, source_name, collection=collection, reindex=reindex,
+        matter_id=matter_id,
     )
     coll = outcome.collection
 
-    client = connect(host, port)
-    _precheck_qdrant(client)
+    client = connect()
+    _precheck_store(client)
 
     log.info("Retrieving relevant chunks ...")
     retrieval_query = build_retrieval_query(template, structured_inputs)
     query_vec = embed([retrieval_query], model_name=embed_model)[0]
     hits = search(client, coll, query_vec, resolved_top_k)
+    # Phase 3: `search` returns ScoredChunk (it used to hand back raw Qdrant
+    # points, and this comprehension reached into h.payload[...]).
     retrieved = [
-        {
-            "source": h.payload["source"],
-            "locator": h.payload["locator"],
-            "text": h.payload["text"],
-        }
-        for h in hits
+        {"source": h.source, "locator": h.locator, "text": h.text} for h in hits
     ]
     if not retrieved:
         raise PdfHasNoText("No chunks retrieved.")
@@ -602,7 +647,7 @@ def run_matter_query(
 ) -> PipelineResult:
     """Scatter-gather retrieve -> answer across every file in a matter (Day 4b).
 
-    No ingest (files are already in Qdrant). Retrieves top_k from each file's
+    No ingest (files are already indexed). Retrieves top_k from each file's
     collection, merges by score to a global top_k, runs the limitation gate
     across ALL files in matter mode, and builds a PipelineResult with
     cross_document=True. Shares the answer/citation tail with run_query.
@@ -628,10 +673,10 @@ def run_matter_query(
         resolved_top_k = DETAILED_MATTER_TOP_K
     else:
         resolved_top_k = template.top_k
-    host, port, embed_model, model = _config()
+    embed_model, model = _config()
 
-    client = connect(host, port)
-    _precheck_qdrant(client)
+    client = connect()
+    _precheck_store(client)
 
     collections = [f.collection for f in files]
     coll_to_file_id = {f.collection: f.id for f in files}
@@ -728,7 +773,7 @@ def compare_per_file_top_k(base_top_k: int, n_files: int) -> int:
     contributing fewer than that cannot show a clause plus enough surrounding
     text to compare it, and a thin column is a worse outcome than exceeding the
     budget. Never reduces the number of FILES; every selected file keeps its
-    column. Pure and separate so it can be checked without a live Qdrant."""
+    column. Pure and separate so it can be checked without a live store."""
     if n_files <= 0:
         return base_top_k
     return max(COMPARE_MIN_PER_FILE_TOP_K, min(base_top_k, COMPARE_TOTAL_CHUNK_BUDGET // n_files))
@@ -803,9 +848,9 @@ def run_compare_clauses(
             "their table columns and citations will not be distinguishable."
         )
 
-    host, port, embed_model, model = _config()
-    client = connect(host, port)
-    _precheck_qdrant(client)
+    embed_model, model = _config()
+    client = connect()
+    _precheck_store(client)
 
     log.info(
         f"Comparing clauses across {len(files)} file(s), "

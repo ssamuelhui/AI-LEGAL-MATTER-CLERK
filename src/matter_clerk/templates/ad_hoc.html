@@ -7,11 +7,11 @@
   <p class="sub">Quick cited query against one document, without creating a matter.</p>
 </section>
 
-{% if not qdrant_ok %}
+{% if not store_ok %}
 <div class="banner error">
-  <strong>Qdrant is not reachable.</strong> Start it with
-  <code>docker compose up -d</code> and reload this page.
-  {% if qdrant_err %}<div style="margin-top:6px;font-size:12px;">({{ qdrant_err }})</div>{% endif %}
+  <strong>The document index could not be opened.</strong> Check that the
+  application's data folder exists and is writable, then reload this page.
+  {% if store_err %}<div style="margin-top:6px;font-size:12px;">({{ store_err }})</div>{% endif %}
 </div>
 {% else %}
 {% if error %}<div class="banner error">{{ error }}</div>{% endif %}

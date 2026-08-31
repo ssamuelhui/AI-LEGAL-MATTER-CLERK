@@ -9,7 +9,11 @@ description = "Document-grounded AI tool for Canadian legal work (per docs/SoW.d
 requires-python = ">=3.11"
 dependencies = [
     "pypdf>=5.0",
-    "qdrant-client>=1.12",
+    # Phase 3: ChromaDB in EMBEDDED mode, replacing Qdrant. Pinned to 1.x --
+    # the API this code targets (configuration={"hnsw": ...}, embedding_function
+    # =None, query/get column-oriented results) is the 1.x surface; 0.4.x is a
+    # materially different API and would fail at import-time usage, not install.
+    "chromadb>=1.5,<2",
     "sentence-transformers>=3.0",
     "openai>=1.50",
     "pydantic>=2.0",

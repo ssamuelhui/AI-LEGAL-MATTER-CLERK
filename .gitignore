@@ -18,6 +18,7 @@ build/
 *.swp
 
 # Vector DB persistent storage
+data/chroma/
 qdrant_storage/
 
 # Matter persistence (contains confidential matter data; never commit)
