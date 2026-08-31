@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block subtitle %} &mdash; Updating{% endblock %}
+{% block content %}
+
+<section class="block">
+  <h2>Installing version {{ version }}</h2>
+
+  <div class="banner info">
+    <strong>Matter Clerk is closing so the update can install.</strong>
+    <div style="margin-top:8px;">
+      The installer has started &mdash; look for its window, which may be
+      behind this one. Follow it through, then start Matter Clerk again from
+      your Start Menu.
+    </div>
+  </div>
+
+  <p class="sub">
+    Your matters, documents and settings are stored separately from the
+    application and are not touched by the update.
+  </p>
+
+  <p class="sub">
+    If no installer window appears, the download is in your Matter Clerk data
+    folder under <code>updates</code>, and can be run by hand.
+  </p>
+</section>
+
+{% endblock %}

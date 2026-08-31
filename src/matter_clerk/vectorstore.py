@@ -28,6 +28,7 @@ current embedding model, not a property we should depend on.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,8 @@ import chromadb
 from chromadb.api import ClientAPI
 
 from .ingest import Chunk
+
+log = logging.getLogger("matter_clerk.vectorstore")
 from .paths import data_path
 
 # Chroma's HNSW index is configured per collection at creation time. Kept here
@@ -338,6 +341,77 @@ def _query(client: ClientAPI, name: str, query_vec: list[float], top_k: int):
     )
 
 
+def collection_doc_count(client: ClientAPI, name: str) -> int | None:
+    """Number of documents in a collection; None if it cannot be read at all.
+
+    Used by ingest verification and by the migration backfill. Deliberately
+    interrogates the store rather than trusting an ingest-time counter --
+    `IngestOutcome.chunk_count` is 0 for a legitimate cache hit as well as for
+    a failed ingest, so it cannot distinguish them.
+    """
+    try:
+        col = _get(client, name)
+        if col is None:
+            return None
+        return int(col.count())
+    except Exception:
+        return None
+
+
+def probe_collection(client: ClientAPI, name: str, dim: int) -> str:
+    """Classify a collection as 'ok', 'missing', 'empty' or 'unreadable'.
+
+    'unreadable' is the state behind the crash reported from the field: the
+    collection is registered and may even report a count, but reading it raises
+    from the Rust backend. A count alone does not prove readability, so this
+    performs an actual query.
+    """
+    col = _get(client, name)
+    if col is None:
+        return "missing"
+    try:
+        if int(col.count()) == 0:
+            return "empty"
+        col.query(query_embeddings=[[0.0] * dim], n_results=1, include=[])
+        return "ok"
+    except Exception:
+        return "unreadable"
+
+
+def _safe(name: str, fn):
+    """Run one per-collection read, converting a broken collection into a skip.
+
+    Catches broadly and deliberately. chromadb surfaces corrupt or half-written
+    segments as chromadb.errors.InternalError with several different messages
+    ("Nothing found on disk", "Missing vector segment"), and the exact set is
+    version-dependent -- so narrowing this to known strings would re-open the
+    exact failure it exists to prevent. The whole point is that one unreadable
+    file must not cost a lawyer the other twenty-seven.
+
+    Returns (value, error_label). Exactly one is None.
+    """
+    try:
+        return fn(), None
+    except Exception as e:                                        # noqa: BLE001
+        log.warning(
+            f"collection {name!r} is unreadable and was skipped: "
+            f"{type(e).__name__}: {e}"
+        )
+        return None, f"{type(e).__name__}: {e}"
+
+
+@dataclass
+class RetrievalReport:
+    """Which collections answered, and which could not be read."""
+
+    skipped: list[str]                    # collection names that failed
+    attempted: int                        # how many were tried
+
+    @property
+    def ok_count(self) -> int:
+        return self.attempted - len(self.skipped)
+
+
 def search(
     client: ClientAPI, name: str, query_vec: list[float], top_k: int
 ) -> list[ScoredChunk]:
@@ -357,7 +431,7 @@ def search_across_collections(
     collections: list[str],
     query_vec: list[float],
     top_k: int,
-) -> list[ScoredChunk]:
+) -> tuple[list[ScoredChunk], RetrievalReport]:
     """Scatter-gather retrieval across several collections (Day 4b).
 
     Retrieves `top_k` from EACH collection independently, then merges by
@@ -374,12 +448,33 @@ def search_across_collections(
     matter. An empty list yields an empty result.
 
     The descending sort is only correct because `_to_similarity` has already
-    flipped Chroma's distance into a similarity."""
+    flipped Chroma's distance into a similarity.
+
+    RETURN TYPE CHANGED in Session 6a: now (chunks, report). A single corrupt
+    collection used to raise out of here and cost the caller the entire
+    matter; unreadable collections are now skipped and named in the report so
+    the result page can say which files did not contribute."""
     merged: list[ScoredChunk] = []
+    skipped: list[str] = []
     for name in collections:
-        merged.extend(_rows(name, _query(client, name, query_vec, top_k)))
+        rows, err = _safe(name, lambda n=name: _rows(n, _query(client, n, query_vec, top_k)))
+        if err is not None:
+            skipped.append(name)
+        else:
+            merged.extend(rows)
+
+    # All of them failing is a real error, not an empty result. "Nothing matched
+    # your question" and "none of your files could be read" must never look the
+    # same to a lawyer -- the first is an answer, the second is a broken matter.
+    if collections and len(skipped) == len(collections):
+        raise VectorStoreUnavailable(
+            f"None of the {len(collections)} file(s) in this matter could be "
+            "read from the search index. The index may be damaged; run "
+            "Diagnostics from the matter page and re-ingest the affected files."
+        )
+
     merged.sort(key=lambda c: c.score, reverse=True)
-    return merged[:top_k]
+    return merged[:top_k], RetrievalReport(skipped=skipped, attempted=len(collections))
 
 
 def retrieve_per_file_by_query(
@@ -387,7 +482,7 @@ def retrieve_per_file_by_query(
     collections: list[str],
     query_vec: list[float],
     top_k: int,
-) -> dict[str, list[ScoredChunk]]:
+) -> tuple[dict[str, list[ScoredChunk]], RetrievalReport]:
     """Per-collection retrieval that keeps hits GROUPED by their source (Day 4c).
 
     Deliberately NOT a mode of `search_across_collections`. That function fetches
@@ -408,16 +503,59 @@ def retrieve_per_file_by_query(
 
     `top_k` is per collection here (not a global cap), so the total number of
     chunks returned is `top_k * len(collections)`; the caller owns that budget.
-    A failing collection propagates rather than being skipped — same reasoning
-    as `search_across_collections`: a silent gap in a legal retrieval is worse
-    than a loud failure.
+
+    Session 6a revised the failure policy, and the original reasoning is worth
+    restating because it still holds: a SILENT gap in a legal retrieval is
+    worse than a loud failure. An unreadable collection is now skipped rather
+    than propagated — but it is named in the returned report and surfaced on
+    the result page, so the gap is never silent. What changed is that one
+    damaged file no longer costs the lawyer every other file in the matter;
+    what did not change is that they are always told.
 
     Both properties are ours, not Chroma's, and are preserved by construction:
     the dict is built by iterating `collections` in order."""
     out: dict[str, list[ScoredChunk]] = {}
+    skipped: list[str] = []
     for name in collections:
-        out[name] = _rows(name, _query(client, name, query_vec, top_k))
-    return out
+        rows, err = _safe(name, lambda n=name: _rows(n, _query(client, n, query_vec, top_k)))
+        if err is not None:
+            skipped.append(name)
+            out[name] = []          # key still present: property 1 above holds
+        else:
+            out[name] = rows
+
+    if collections and len(skipped) == len(collections):
+        raise VectorStoreUnavailable(
+            f"None of the {len(collections)} selected file(s) could be read "
+            "from the search index."
+        )
+    return out, RetrievalReport(skipped=skipped, attempted=len(collections))
+
+
+def all_chunks_for(
+    client: ClientAPI, names: list[str], batch: int = 256
+) -> tuple[dict[str, list[str]], RetrievalReport]:
+    """Whole-collection text for several collections, skipping unreadable ones.
+
+    The guarded sibling of `all_chunks`, for the pleading limitation scan --
+    which reads EVERY file in a matter, and so was exposed to exactly the same
+    corrupt-collection failure as the query paths. It uses `col.get`, not
+    `col.query`, so guarding `_query` alone would have left this path live.
+
+    A skipped collection means the limitation scan did not see that file. That
+    is a safety-relevant gap, so the caller must surface it rather than treat
+    an incomplete scan as a clean one.
+    """
+    out: dict[str, list[str]] = {}
+    skipped: list[str] = []
+    for name in names:
+        texts, err = _safe(name, lambda n=name: all_chunks(client, n, batch))
+        if err is not None:
+            skipped.append(name)
+            out[name] = []
+        else:
+            out[name] = texts
+    return out, RetrievalReport(skipped=skipped, attempted=len(names))
 
 
 def all_chunks(client: ClientAPI, name: str, batch: int = 256) -> list[str]:

@@ -5,6 +5,8 @@ import os
 import re
 import shutil
 import tempfile
+import threading
+import traceback
 from pathlib import Path
 
 import bleach
@@ -23,7 +25,8 @@ from flask import (
 from werkzeug.serving import make_server
 
 from . import (
-    audit, canlii, citations, discovery, export, matters, pipeline, pleadings,
+    audit, canlii, citations, discovery, export, llm, maintenance, matters,
+    pipeline, pleadings, updater,
 )
 from .prompts import (
     DEFAULT_TASK,
@@ -185,6 +188,7 @@ def _render_result(
             render_markdown(pleadings.COVER_NOTE) if is_pleading else None
         ),
         pleading_warnings=result.pleading_warnings,
+        retrieval_warnings=result.retrieval_warnings,
         email_metadata=result.email_metadata,
         attachment_warnings=result.attachment_warnings,
         answer_html=decorate_verification_markers(
@@ -225,6 +229,148 @@ def create_app() -> Flask:
     def healthz():
         return {"app": "matter-clerk", "ok": True}
 
+    @app.context_processor
+    def inject_banners():
+        """Notices and the update bar, for every template that extends base.
+
+        The update bar is deliberately confined to the matters list. It must
+        never appear over a result the lawyer is reading, and never while a
+        task is being set up -- an offer to close the application mid-draft is
+        an offer to lose work.
+        """
+        upd = updater.available_update() if request.endpoint == "index" else None
+        try:
+            on_page = request.endpoint in ("index", "matter_detail")
+            notices = maintenance.take_notices() if on_page else []
+        except Exception:
+            notices = []
+        return {"update": upd, "notices": notices}
+
+    # ----------------------------------------------------------------------
+    # Global error handler (Session 6a)
+    #
+    # A lawyer must never meet Flask's bare "Internal Server Error". Before
+    # this, an unhandled exception in a task showed exactly that, with the
+    # only useful text stranded in a console window behind the browser -- which
+    # is how the field report arrived: a screenshot of a traceback.
+    # ----------------------------------------------------------------------
+    @app.errorhandler(Exception)
+    def handle_unexpected(e):
+        from werkzeug.exceptions import HTTPException
+
+        if isinstance(e, HTTPException):
+            return e                      # 404s and friends keep their meaning
+
+        tb = traceback.format_exc()
+        log.error("unhandled error on %s: %s", request.path, tb)
+        try:
+            audit.log_event(
+                "unhandled_error",
+                path=request.path,
+                method=request.method,
+                matter_id=request.view_args.get("matter_id") if request.view_args else None,
+                task=request.form.get("task") if request.form else None,
+                error=f"{type(e).__name__}: {e}",
+                traceback=tb,
+            )
+        except Exception:                                         # noqa: BLE001
+            pass
+        return render_template("error.html", error_type=type(e).__name__), 500
+
+    # ----------------------------------------------------------------------
+    # Recovery and support routes (Session 6a)
+    # ----------------------------------------------------------------------
+    @app.post("/matters/<int:matter_id>/files/<int:file_id>/reingest")
+    def reingest_file(matter_id: int, file_id: int):
+        conn = matters.connect()
+        try:
+            mf = matters.get_file(conn, file_id)
+            if mf is None or mf.matter_id != matter_id:
+                abort(404)
+            stored = Path(mf.stored_path)
+            if not stored.is_file():
+                flash(f"{mf.filename}: the stored copy is missing. Upload the "
+                      f"file again.", "error")
+                return redirect(url_for("matter_detail", matter_id=matter_id))
+            try:
+                # reindex=True: the whole point is to rebuild, so never take
+                # the cache path -- a damaged collection is what we are replacing.
+                outcome = pipeline.ingest_file(
+                    stored, mf.filename, collection=mf.collection,
+                    reindex=True, matter_id=matter_id,
+                )
+                if outcome.quality == "ocr_low_quality":
+                    matters.mark_file_ingested(
+                        conn, file_id, status="ocr_low_quality",
+                        note=outcome.quality_detail,
+                    )
+                    flash(f"Re-processed {mf.filename}, but the scan quality is "
+                          f"still poor. {outcome.quality_detail}", "warn")
+                else:
+                    matters.mark_file_ingested(conn, file_id)
+                    flash(f"Re-processed {mf.filename}.", "ok")
+            except pipeline.PdfHasNoText as e:
+                matters.mark_file_no_text(conn, file_id, str(e))
+                flash(f"{mf.filename}: still no readable text. A clearer scan "
+                      f"is needed.", "warn")
+            except Exception as e:                                # noqa: BLE001
+                matters.mark_file_failed(conn, file_id, str(e))
+                flash(f"{mf.filename}: re-processing failed: {e}", "error")
+        finally:
+            conn.close()
+        return redirect(url_for("matter_detail", matter_id=matter_id))
+
+    @app.post("/matters/<int:matter_id>/remove-failed")
+    def remove_failed_files(matter_id: int):
+        conn = matters.connect()
+        removed = 0
+        try:
+            for mf in matters.list_files(conn, matter_id):
+                if matters.is_queryable(mf.ingest_status):
+                    continue
+                # The stored document is left on disk deliberately: it is the
+                # lawyer's own file, and deleting client material to tidy a
+                # list is not a trade this application gets to make.
+                matters.delete_file(conn, mf.id)
+                removed += 1
+        finally:
+            conn.close()
+        flash(f"Removed {removed} unreadable file(s) from this matter. Your "
+              f"original documents were not deleted.", "ok" if removed else "warn")
+        return redirect(url_for("matter_detail", matter_id=matter_id))
+
+    @app.post("/diagnostics")
+    def run_diagnostics():
+        try:
+            path = maintenance.write_diagnostic_report()
+            flash(f"Diagnostic report saved to {path}. It contains no document "
+                  f"text, matter names or file names -- only structure. Email "
+                  f"it to your Matter Clerk contact.", "ok")
+        except Exception as e:                                    # noqa: BLE001
+            flash(f"Could not create the diagnostic report: {e}", "error")
+        return redirect(request.referrer or url_for("index"))
+
+    @app.post("/update/dismiss")
+    def dismiss_update():
+        updater.dismiss()
+        return redirect(request.referrer or url_for("index"))
+
+    @app.post("/update/install")
+    def install_update():
+        info = updater.available_update()
+        if not info:
+            flash("No update is pending.", "warn")
+            return redirect(url_for("index"))
+        try:
+            path = updater.download_installer(info)
+        except Exception as e:                                    # noqa: BLE001
+            flash(f"Could not download the update: {e}", "error")
+            return redirect(url_for("index"))
+        updater.launch_installer(path)
+        # The installer replaces files this process holds open, so it must go.
+        threading.Timer(1.5, lambda: os._exit(0)).start()
+        return render_template("updating.html", version=info["version"])
+
     # ----------------------------------------------------------------------
     # Render helpers (kept inside create_app so url_for is available)
     # ----------------------------------------------------------------------
@@ -243,7 +389,7 @@ def create_app() -> Flask:
     def render_matter_detail(conn, matter_id, status=200, **kw):
         matter = matters.get_matter(conn, matter_id)
         files = matters.list_files(conn, matter_id)
-        queryable = [f for f in files if f.ingest_status == "ingested"]
+        queryable = [f for f in files if matters.is_queryable(f.ingest_status)]
         ok, err = _store_ok()
         defaults = dict(
             store_ok=ok, store_err=err, error=None,
@@ -293,10 +439,25 @@ def create_app() -> Flask:
             shutil.move(str(tmp_path), str(stored))
             tmp_path = None  # moved into the store; nothing left to clean up
             try:
-                pipeline.ingest_file(stored, filename, collection=coll,
-                                     matter_id=matter.id)
-                matters.mark_file_ingested(conn, row.id)
-                flash(f"Added {filename}.", "ok")
+                outcome = pipeline.ingest_file(stored, filename, collection=coll,
+                                               matter_id=matter.id)
+                if outcome.quality == "ocr_low_quality":
+                    # Still indexed and still queryable -- the lawyer decides
+                    # whether a better scan is worth chasing. Silently accepting
+                    # it is what produced "2 events from 28 files".
+                    matters.mark_file_ingested(
+                        conn, row.id, status="ocr_low_quality",
+                        note=outcome.quality_detail,
+                    )
+                    flash(f"Added {filename}, but the scan quality is poor. "
+                          f"{outcome.quality_detail}", "warn")
+                else:
+                    matters.mark_file_ingested(conn, row.id)
+                    flash(f"Added {filename}.", "ok")
+            except pipeline.PdfHasNoText as e:
+                matters.mark_file_no_text(conn, row.id, str(e))
+                flash(f"{filename}: no readable text found. Re-upload a "
+                      f"clearer scan or a text-based PDF.", "warn")
             except Exception as e:
                 matters.mark_file_failed(conn, row.id, str(e))
                 flash(f"{filename}: ingest failed: {e}", "error")
@@ -407,7 +568,7 @@ def create_app() -> Flask:
             # POST that arrives regardless.
             n_ingested = len([
                 f for f in matters.list_files(conn, matter_id)
-                if f.ingest_status == "ingested"
+                if matters.is_queryable(f.ingest_status)
             ])
             unavailable = task_unavailable_reason(task, n_ingested)
             if unavailable:
@@ -465,7 +626,7 @@ def create_app() -> Flask:
                 # ---- whole-matter branch: every successfully-ingested file ----
                 files = [
                     f for f in matters.list_files(conn, matter_id)
-                    if f.ingest_status == "ingested"
+                    if matters.is_queryable(f.ingest_status)
                 ]
                 if not files:
                     return render_matter_detail(
@@ -572,6 +733,12 @@ def create_app() -> Flask:
             except pipeline.CompareClausesNotApplicable as e:
                 return render_matter_detail(
                     conn, matter_id, status=400, error=str(e), **common
+                )
+            # A missing API key is a configuration problem, not a server fault:
+            # 503 with the remedy in the message, never an opaque 500.
+            except llm.MissingAPIKey as e:
+                return render_matter_detail(
+                    conn, matter_id, status=503, error=str(e), **common
                 )
             # CanLII failures are refusals with a specific cause, never opaque
             # 500s: the lawyer needs to know whether to fix a key, wait out a
@@ -753,6 +920,8 @@ def create_app() -> Flask:
                     reindex=reindex,
                     # matter_id defaults to None -> audit records null for ad-hoc.
                 )
+            except llm.MissingAPIKey as e:
+                return render_ad_hoc(status=503, error=str(e), **common)
             except pipeline.VectorStoreUnreachable as e:
                 return render_ad_hoc(status=503, store_ok=False, store_err=str(e), **common)
             except pipeline.PdfHasNoText as e:

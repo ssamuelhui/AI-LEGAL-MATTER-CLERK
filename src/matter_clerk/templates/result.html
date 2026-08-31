@@ -109,6 +109,13 @@
 </div>
 {% endif %}
 
+{# Session 6a: files the search index could not read. Shown ABOVE the answer,
+   not below it -- a lawyer must know the answer is partial before they read
+   it, not after they have relied on it. #}
+{% for w in retrieval_warnings %}
+<div class="banner warn"><strong>Incomplete retrieval.</strong> {{ w }}</div>
+{% endfor %}
+
 {% for w in pleading_warnings %}
 <div class="banner warn">{{ w }}</div>
 {% endfor %}

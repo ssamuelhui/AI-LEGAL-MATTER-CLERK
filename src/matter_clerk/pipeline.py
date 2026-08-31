@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import string
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,7 @@ from .prompts import (
 from .vectorstore import (
     VectorStoreUnavailable,
     all_chunks,
+    all_chunks_for,
     collection_exists,
     connect,
     default_collection_name,
@@ -45,6 +47,8 @@ from .vectorstore import (
     search,
     search_across_collections,
     store_ok,
+    collection_doc_count,
+    delete_collection,
     upsert_chunks,
 )
 
@@ -184,6 +188,10 @@ class PipelineResult(BaseModel):
     # Divergence between the structured data and the markdown table, surfaced to
     # the user rather than silently resolved in favour of either.
     export_warnings: list[str] = []
+    # Session 6a: files that could not be read from the index during this
+    # retrieval. Never silently dropped -- an answer built from 26 of 28
+    # files must say so on the page the lawyer reads.
+    retrieval_warnings: list[str] = []
     # Phase 2b: citation verification. `authority_mode` is False for every task
     # and every run except a Draft Memo / Draft Pleading the lawyer explicitly
     # switched into authority mode, and `verification` is None whenever it is
@@ -209,6 +217,90 @@ class IngestOutcome(BaseModel):
     unreadable_pages: list[int] = []
     email_metadata: Optional[EmailMetadata] = None
     attachment_warnings: list[str] = []
+    # Session 6a. `quality` is the verdict the matter manifest records as
+    # ingest_status: "ok", "ocr_low_quality", or "failed_no_text".
+    quality: str = "ok"
+    quality_detail: str = ""
+    chars_extracted: int = 0
+    chars_per_page: float = 0.0
+    legible_ratio: float = 1.0
+
+
+# --------------------------------------------------------------------------
+# Extraction-quality assessment (Session 6a)
+#
+# The pilot report was "Timeline extracted only 2 events from 28 files". The
+# crash was one bug; this is the other, and arguably the one the lawyer felt.
+# Files were being indexed with OCR output too poor to answer anything from,
+# and nothing anywhere said so.
+#
+# Thresholds are calibrated against the nine real scanned/native matter files
+# in this repo, not guessed:
+#     good files measured 811-4,006 chars/page and 0.996-1.000 legible ratio.
+# 150 chars/page is a 5x margin below the worst good file; 0.85 legible is a
+# wide margin below the worst good file. Both are deliberately permissive: a
+# false "low quality" on a genuinely sparse one-line covering letter is an
+# annoyance, whereas a false "fine" on 28 unusable files is the bug being fixed.
+# --------------------------------------------------------------------------
+MIN_CHARS_PER_PAGE = 150
+MIN_LEGIBLE_RATIO = 0.85
+
+# Letters, digits, whitespace and ordinary punctuation. Everything else --
+# box-drawing characters, stray CJK, control glyphs -- is what a failed OCR
+# pass produces instead of text.
+_LEGIBLE_CHARS = frozenset(
+    string.ascii_letters + string.digits + string.whitespace + string.punctuation
+)
+
+
+def _legible_ratio(text: str) -> float:
+    if not text:
+        return 1.0
+    return sum(1 for ch in text if ch in _LEGIBLE_CHARS) / len(text)
+
+
+def assess_extraction(
+    pages: list[tuple[int, str]], ocr_pages: list[int]
+) -> tuple[str, str]:
+    """Classify extraction quality. Returns (verdict, human-readable detail).
+
+    Only OCR'd documents can be graded "low quality": a native-text PDF that is
+    genuinely short is short, not damaged, and flagging it would train the
+    lawyer to ignore the badge.
+    """
+    if not pages:
+        return "failed_no_text", "No readable text was extracted from this file."
+
+    text = "".join(t for _, t in pages)
+    per_page = len(text) / max(1, len(pages))
+    ratio = _legible_ratio(text)
+
+    if not ocr_pages:
+        return "ok", ""
+
+    if per_page < MIN_CHARS_PER_PAGE:
+        return (
+            "ocr_low_quality",
+            f"Scanned pages produced only {per_page:.0f} characters per page "
+            f"on average (typical is over 1,500). The scan may be too faint, "
+            f"skewed, or low-resolution to read.",
+        )
+    if ratio < MIN_LEGIBLE_RATIO:
+        return (
+            "ocr_low_quality",
+            f"Only {ratio * 100:.0f}% of the recognised characters look like "
+            f"normal text, so the scan was probably misread. A clearer copy "
+            f"would give better results.",
+        )
+    return "ok", ""
+
+
+def _filename_for(files, collection: str) -> str:
+    """Map a collection name back to its filename for user-facing messages."""
+    for f in files:
+        if f.collection == collection:
+            return f.filename
+    return collection
 
 
 def _config() -> tuple[str, str]:
@@ -267,8 +359,22 @@ def ingest_file(
     coll = collection or default_collection_name(path)
     needs_index = reindex or not collection_exists(client, coll)
 
+    # Session 6a: existence is not usability. `recreate_collection` runs BEFORE
+    # `upsert_chunks`, so an ingest that dies between them leaves a registered
+    # but empty collection -- and the old `collection_exists` check would then
+    # treat a re-upload of that file as a cache hit, skip indexing entirely,
+    # and report success. The file ended up marked "ingested" with nothing
+    # behind it. Re-index instead of trusting the cache.
+    if not needs_index and (collection_doc_count(client, coll) or 0) == 0:
+        log.warning(
+            f"cached collection {coll!r} holds no documents; re-indexing "
+            f"{source_name} rather than reusing it"
+        )
+        needs_index = True
+
     ocr_pages: list[int] = []
     unreadable_pages: list[int] = []
+    _assessed_pages: list[tuple[int, str]] = []
     email_metadata: EmailMetadata | None = None
     attachment_warnings: list[str] = []
     email_body = ""
@@ -285,6 +391,7 @@ def ingest_file(
             chunks = chunk_email(
                 email_body, source=source_name, locator=email_metadata.locator
             )
+            _assessed_pages = [(1, email_body)]
             log.info(f"Extracted email body ({len(email_body)} chars)")
         else:
             pages, ocr_pages, unreadable_pages = extract_pdf_pages(path)
@@ -295,6 +402,7 @@ def ingest_file(
             if not pages:
                 raise PdfHasNoText(f"No extractable text on any page of {source_name}.")
             chunks = chunk_pages(pages, source=source_name, ocr_pages=ocr_pages)
+            _assessed_pages = pages
         log.info(f"Embedding {len(chunks)} chunks with {embed_model} ...")
         vectors = embed([c.text for c in chunks], model_name=embed_model)
         # Phase 3: the content hash is now written into every chunk id and into
@@ -319,15 +427,41 @@ def ingest_file(
             content_sha256=content_sha, matter_id=matter_id,
         )
         chunk_count = len(chunks)
-        log.info(f"Indexed into collection: {coll}")
+
+        # Verify against the STORE, not against len(chunks). The two can differ
+        # if the write failed, and a collection that reports zero documents is
+        # the state that produced unreadable matters in the field. Removing it
+        # here is what stops a broken collection outliving the failed ingest.
+        indexed = collection_doc_count(client, coll) or 0
+        if indexed == 0:
+            try:
+                delete_collection(client, coll)
+            except Exception:                                     # noqa: BLE001
+                log.warning(f"could not remove empty collection {coll!r}")
+            raise PdfHasNoText(
+                f"{source_name} produced no searchable content and was not "
+                "added to the matter."
+            )
+
+        log.info(f"Indexed {indexed} chunk(s) into collection: {coll}")
     else:
         log.info(f"Reusing existing collection: {coll}")
+
+    quality, quality_detail = (
+        assess_extraction(_assessed_pages, ocr_pages) if needs_index else ("ok", "")
+    )
+    _text = "".join(t for _, t in _assessed_pages)
 
     return IngestOutcome(
         collection=coll,
         sha256=file_hash(path),
         was_reindexed=needs_index,
         chunk_count=chunk_count,
+        quality=quality,
+        quality_detail=quality_detail,
+        chars_extracted=len(_text),
+        chars_per_page=(len(_text) / len(_assessed_pages)) if _assessed_pages else 0.0,
+        legible_ratio=_legible_ratio(_text) if _text else 1.0,
         ocr_pages=ocr_pages,
         unreadable_pages=unreadable_pages,
         email_metadata=email_metadata,
@@ -467,6 +601,7 @@ def _answer_and_build(
     embed_model: str,
     resolved_top_k: int,
     pleading_warnings: list[str],
+    retrieval_warnings: list[str] | None = None,
     cross_document: bool = False,
     retrieved_sources: list[str] | None = None,
     retrieved_file_ids: list[int] | None = None,
@@ -560,6 +695,7 @@ def _answer_and_build(
         ocr_pages=ocr_pages or [],
         unreadable_pages=unreadable_pages or [],
         pleading_warnings=pleading_warnings,
+        retrieval_warnings=list(retrieval_warnings or []),
         email_metadata=email_metadata,
         attachment_warnings=attachment_warnings or [],
         model=model,
@@ -684,9 +820,20 @@ def run_matter_query(
     log.info(f"Retrieving across {len(collections)} matter file(s) ...")
     retrieval_query = build_retrieval_query(template, structured_inputs)
     query_vec = embed([retrieval_query], model_name=embed_model)[0]
-    scored = search_across_collections(client, collections, query_vec, resolved_top_k)
+    scored, report = search_across_collections(
+        client, collections, query_vec, resolved_top_k
+    )
     if not scored:
         raise PdfHasNoText("No chunks retrieved from any file in this matter.")
+    retrieval_warnings: list[str] = []
+    if report.skipped:
+        names = ", ".join(_filename_for(files, c) for c in report.skipped)
+        retrieval_warnings.append(
+            f"Retrieved from {report.ok_count} of {report.attempted} files. "
+            f"{len(report.skipped)} file(s) could not be read from the search "
+            f"index and did not contribute to this answer: {names}. "
+            "Open the matter to re-process them."
+        )
 
     retrieved = [
         {"source": sc.source, "locator": sc.locator, "text": sc.text} for sc in scored
@@ -712,7 +859,22 @@ def run_matter_query(
         claim_particulars = structured_inputs.get("claim_particulars") or ""
         # Scroll every collection exactly once; reuse the texts for both the
         # limitation scan and the defendant hallmarks check.
-        matter_texts = [(f, all_chunks(client, f.collection)) for f in files]
+        texts_by_coll, scan_report = all_chunks_for(
+            client, [f.collection for f in files]
+        )
+        matter_texts = [(f, texts_by_coll.get(f.collection, [])) for f in files]
+        if scan_report.skipped:
+            # An incomplete limitation scan must never read as a clean one: the
+            # gate exists to catch a time-barred claim, and a file it could not
+            # read is a file it could not clear.
+            unscanned = [_filename_for(files, c) for c in scan_report.skipped]
+            pleading_warnings.append(
+                "The limitation review could not read "
+                f"{len(unscanned)} file(s) in this matter "
+                f"({', '.join(unscanned)}); they were NOT scanned for "
+                "limitation signals. Re-ingest them before relying on this "
+                "review."
+            )
         per_file = _scan_matter_for_limitation(matter_texts, claim_particulars)
         if per_file:
             flat: list[str] = []  # order-preserving union across files
@@ -758,6 +920,7 @@ def run_matter_query(
         embed_model=embed_model,
         resolved_top_k=resolved_top_k,
         pleading_warnings=pleading_warnings,
+        retrieval_warnings=retrieval_warnings,
         cross_document=True,
         retrieved_sources=retrieved_sources,
         retrieved_file_ids=retrieved_file_ids,
@@ -861,9 +1024,18 @@ def run_compare_clauses(
     # `retrieval_query`, so this returns exactly what the user typed.
     retrieval_query = build_retrieval_query(template, structured_inputs)
     query_vec = embed([retrieval_query], model_name=embed_model)[0]
-    by_collection = retrieve_per_file_by_query(
+    by_collection, compare_report = retrieve_per_file_by_query(
         client, [f.collection for f in files], query_vec, per_file_top_k
     )
+
+    compare_warnings: list[str] = []
+    if compare_report.skipped:
+        names = ", ".join(_filename_for(files, c) for c in compare_report.skipped)
+        compare_warnings.append(
+            f"{len(compare_report.skipped)} of {compare_report.attempted} "
+            f"selected files could not be read from the search index and are "
+            f"missing from this comparison: {names}."
+        )
 
     groups: list[tuple[str, list[dict]]] = []
     retrieved: list[dict] = []          # flat, in column order -> citations
@@ -890,6 +1062,7 @@ def run_compare_clauses(
         embed_model=embed_model,
         resolved_top_k=per_file_top_k,
         pleading_warnings=[],
+        retrieval_warnings=compare_warnings,
         cross_document=True,
         # Every file CHECKED, not merely every file cited.
         retrieved_sources=[f.filename for f in files],

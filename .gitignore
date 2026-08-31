@@ -63,3 +63,6 @@ models/
 # Data-directory layout marker, written at first run (in a source checkout
 # the data directory is the repo root).
 /version.txt
+
+# Session 5: compiled installer (~197 MB, rebuildable from the bundle).
+installer/output/

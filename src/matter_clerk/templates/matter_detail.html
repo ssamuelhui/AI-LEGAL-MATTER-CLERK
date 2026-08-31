@@ -25,18 +25,59 @@ last queried: {{ matter.last_queried_at or "never" }}</div>
   <h2>Files</h2>
   {% if files %}
   <table class="file-table">
-    <thead><tr><th>File</th><th>Type</th><th>Status</th><th>Ingested</th></tr></thead>
+    <thead><tr><th>File</th><th>Type</th><th>Status</th><th>Ingested</th><th></th></tr></thead>
     <tbody>
       {% for f in files %}
       <tr>
         <td>{{ f.filename }}</td>
         <td>{{ f.file_type }}</td>
-        <td class="status-{{ f.ingest_status }}">{{ f.ingest_status }}{% if f.ingest_status == 'failed' and f.ingest_error %}<div class="meta">{{ f.ingest_error }}</div>{% endif %}</td>
+        <td class="status-{{ f.ingest_status }}">
+          {% if f.ingest_status == 'ingested' %}
+            <span class="badge badge-ok">Ready</span>
+          {% elif f.ingest_status == 'ocr_low_quality' %}
+            <span class="badge badge-warn">Poor scan quality</span>
+            <div class="meta">{{ f.ingest_error or 'The scan was hard to read, so answers from this file may be incomplete.' }}</div>
+          {% elif f.ingest_status == 'failed_no_text' %}
+            <span class="badge badge-bad">No readable text</span>
+            <div class="meta">{{ f.ingest_error or 'Nothing searchable could be extracted. This file is not being used to answer questions.' }}</div>
+          {% elif f.ingest_status == 'failed' %}
+            <span class="badge badge-bad">Ingest failed</span>
+            {% if f.ingest_error %}<div class="meta">{{ f.ingest_error }}</div>{% endif %}
+          {% else %}
+            <span class="badge">{{ f.ingest_status }}</span>
+          {% endif %}
+        </td>
         <td>{{ f.ingested_at[:10] if f.ingested_at else "-" }}</td>
+        <td>
+          {% if f.ingest_status != 'ingested' %}
+          <form method="post" style="margin:0"
+                action="{{ url_for('reingest_file', matter_id=matter.id, file_id=f.id) }}">
+            <button type="submit" class="btn-small">Re-process</button>
+          </form>
+          {% endif %}
+        </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+
+  {% set broken = files | rejectattr('ingest_status', 'in', ['ingested', 'ocr_low_quality']) | list %}
+  {% if broken %}
+  <div class="banner warn" style="margin-top:14px;">
+    <strong>{{ broken | length }} file(s) in this matter cannot be searched.</strong>
+    They are excluded from every task, so answers here are based only on the
+    other {{ (files | length) - (broken | length) }} file(s).
+    <div style="margin-top:8px;">
+      Try <em>Re-process</em> first. If that does not help, the source is
+      probably an unreadable scan &mdash; re-upload a clearer copy.
+    </div>
+    <form method="post" style="margin-top:10px"
+          action="{{ url_for('remove_failed_files', matter_id=matter.id) }}"
+          onsubmit="return confirm('Remove {{ broken | length }} unreadable file(s) from this matter? Your original documents on disk are NOT deleted.');">
+      <button type="submit" class="btn-small">Remove unreadable files from this matter</button>
+    </form>
+  </div>
+  {% endif %}
   {% else %}
   <p class="sub">No files yet. Add one or more below.</p>
   {% endif %}

@@ -497,3 +497,140 @@ A `connect_ex` probe that succeeds means someone is listening; the launcher prin
 The launcher also waits for `GET /healthz` — a new route returning a fixed `{"app": "matter-clerk"}` marker — before opening the browser, rather than sleeping a guessed number of seconds. `make_server` has already bound the socket by the time the polling thread starts, so this normally succeeds on the first attempt; on a slow machine it waits longer instead of opening a browser at a connection-refused page.
 **Alternatives considered:** a lock file (more moving parts, and it can be left stale by a crash; the port is already the contended resource); falling back to the next free port (actively harmful here — it would let two instances run against one ChromaDB, which is the failure being prevented).
 **Consequences:** Single-instance protection is a side effect of the port being fixed. Two instances are still possible if a user deliberately sets different `MATTER_CLERK_PORT` values against the same data directory; a lock file would be the answer if that ever shows up in practice.
+
+## 2026-08-31: Per-user Inno Setup installer (Phase 3 Session 5)
+**Context:** Session 3 produced a working 673 MB folder. A lawyer cannot be handed a folder — they need one file to download, a Start Menu entry, and an uninstaller that appears where they expect it.
+**Decision:** Inno Setup 7, per-user install to `%LOCALAPPDATA%\Programs\MatterClerk`, `PrivilegesRequired=lowest`. No UAC prompt appears at any point. `PrivilegesRequiredOverridesAllowed=commandline` is set so a later machine-wide IT rollout needs no script change.
+
+The install directory is deliberately distinct from the data directory (`%LOCALAPPDATA%\MatterClerk`). Application code and privileged client material must be separable, so that removing the program never implies destroying the work.
+
+Compression is `lzma2/ultra64` with `SolidCompression=yes`: **196.6 MB from a 673 MB bundle, 29.2%**. That is far better than the 300-400 MB estimated before measuring, because the solid stream deduplicates the ~90 MB of DLLs the bundle ships twice (see BACKLOG). Worth recording that the pre-measurement estimate was too pessimistic by roughly a third.
+
+**Alternatives considered:** WiX/MSI (the right answer if corporate IT ever needs Group Policy deployment; far heavier to author, and per-machine MSI reintroduces the admin requirement this deployment is avoiding); NSIS (comparable, but Inno's Pascal scripting made the uninstall-data logic clearer); a zip file with a README (no Add/Remove Programs entry, no shortcut, and no way to ask the uninstall question).
+**Consequences:** Unsigned, so SmartScreen warns on first run — accepted, since signing is permanently deferred. The installer must be rebuilt whenever the bundle is; `installer\output\` is gitignored.
+
+## 2026-08-31: First-run wizard is tkinter, not a Flask page
+**Context:** The app needs two API keys before it can do any LLM or CanLII work, and until Session 5 there was no way to supply them except hand-editing a `.env` file whose location the user would have to be told.
+**Decision:** A tkinter dialog in `src/matter_clerk/first_run_wizard.py`, shown by the launcher whenever `.env` is absent, or on demand via `MatterClerk.exe --first-run`.
+
+The deciding argument was not aesthetics or dependencies — it was the open bug in BACKLOG.md about `webbrowser.open()` intermittently failing when launched from a shell context. The installer's post-install step and the Start Menu shortcut are both exactly that context, and Session 5 makes it the *normal* launch path rather than an edge case. A browser-served wizard would depend on the one mechanism already known to fail sometimes, at the one moment a user has no way to recover: they would see a console window and nothing else, on install day. tkinter draws its own window with no browser involved. It looks dated. It appears every time.
+
+Cost: tkinter's tcl/tk data adds ~4 MB and ~929 files to the bundle. Verified present in the built bundle (`_tcl_data\init.tcl`, `tcl86t.dll`, `tk86t.dll`), because a missing tcl runtime would fail precisely on the machine the wizard exists to serve.
+
+**The wizard runs in the same process as the app.** On save it returns True and the launcher falls through into normal startup — no subprocess, no second console window, nothing to orphan. A spawn-and-exit design was rejected because a spawn that fails silently is indistinguishable from a crash, right at the moment first impressions are formed.
+
+**Key validation uses `GET /api/v1/key`, not `GET /models`.** The session brief specified `/models`; that endpoint is unauthenticated. Measured during this session: it returns HTTP 200 for a fabricated key. Testing against it would have told a lawyer their bad key was fine — worse than offering no test at all. `/key` requires the bearer token. Network failures are reported distinctly from rejected keys, because "you are offline" and "your key is wrong" call for different actions and a corporate proxy makes the former common.
+
+The written `.env` is locked to the current user with `icacls` (best-effort, never fatal), since it holds live credentials. The success message deliberately does not echo OpenRouter's key label, which defaults to a masked form of the key itself.
+
+## 2026-08-31: A missing API key is a 503 with a remedy, not a bare 500
+**Context:** Found while testing the Session 5 integration, and it contradicted the session brief. The claim was that the bundle "crashes with OPENROUTER_API_KEY not set". It does not: `LLMClient` is constructed lazily inside `pipeline.run_*` and `discovery`, so the app starts normally, serves the UI, and answers `/healthz` with no key at all. The failure arrives only when a lawyer actually runs a task — and `web.py` had no handler for it, so Flask rendered a **bare "Internal Server Error"** with the one useful sentence visible only in the console window behind the browser.
+
+That is worse than a startup crash. A startup crash is at least legible.
+**Decision:** `llm.MissingAPIKey(RuntimeError)` replaces the bare `RuntimeError`, and both query paths in `web.py` — matter and ad-hoc — catch it and render a 503 whose message names the remedy (`--first-run`, or the `.env` key). A named exception rather than `except RuntimeError`, so the handler cannot silently swallow unrelated runtime failures.
+**Consequences:** With the wizard in place this should be unreachable on a fresh install, but it remains the correct behaviour for a `.env` that is edited, emptied, or has its key revoked — none of which are hypothetical over the life of a deployment.
+
+## 2026-08-31: Uninstall keeps matter data unless asked twice
+**Context:** The uninstaller has to answer "what happens to the lawyer's matters?" There is no undo, and the material is privileged.
+**Decision:** Keep by default. `InitializeUninstall` asks whether to also delete `%LOCALAPPDATA%\MatterClerk`; `MB_DEFBUTTON2` makes "No" the default, and a "Yes" raises a second confirmation that also defaults to "No".
+
+**This replaced the originally approved checkbox, and the reason is worth recording.** A checkbox would have to live on `UninstallProgressForm`, which renders only *after* the user has confirmed they want to uninstall — so the data question would arrive after commitment, where a single mis-click destroys client files irrecoverably. `InitializeUninstall` runs before any file is touched and can abort cleanly by returning False.
+
+`[UninstallDelete]` is static and cannot express this, which is why the logic is in `[Code]` at all.
+**Consequences:** Keeping data means a reinstall finds every matter, the Chroma index, and the existing `.env` — so the wizard correctly does not reappear. If files are locked by a running instance, `DelTree` failure is reported with instructions rather than failing silently.
+
+## 2026-08-31: Inno's section scanner runs before Pascal comments are parsed
+**Context:** The first compile of `matter_clerk.iss` failed with `Error on line 85: Invalid section tag`.
+**Decision:** Use `//` line comments in `[Code]`, and never begin a line with `[`.
+
+The `[Code]` section opened with a `{ ... }` Pascal block comment, one line of which began with `[UninstallDelete]`. Inno's section scanner is line-based and runs *before* Pascal comments are interpreted, so any line whose first non-space character is `[` is read as a section tag — even inside a comment. Recorded because the failure mode is confusing: the error points at a line that is, by every Pascal rule, commented out.
+
+This is Inno 6 behaviour as well, not an Inno 7 change. Nothing else in the script needed adjusting for Inno 7.1.0; it accepted the Inno 6 syntax used throughout.
+
+## 2026-08-31: The reported root cause was tested and does not hold (Session 6a)
+**Context:** A pilot lawyer uploaded 28 files, ran Timeline (which returned only 2 events), then Find Facts, and got a bare Flask "Internal Server Error". The traceback ended at `chromadb.errors.InternalError: Error executing plan: Internal error: Error creating hnsw segment reader: Nothing found on disk`, raised from `search_across_collections`.
+
+The working hypothesis was: ingestion silently succeeds on files that produce zero usable chunks, SQLite records them as ingested, Chroma holds an empty collection, and querying that collection throws.
+
+**Decision: reject the hypothesis, and do not ship a fix predicated on it.** The state it describes was constructed and queried directly. An empty collection returns an empty result set, cleanly. Eight distinct corruption shapes were built and probed on chromadb 1.5.9:
+
+| State | Result |
+|---|---|
+| Empty collection, same process | query OK |
+| Empty collection, fresh process | query OK |
+| Documents present, segment directory deleted | query OK |
+| Segment directory present but emptied | query OK |
+| Segment files truncated to 0 bytes | query OK |
+| `data_level0.bin` + `link_lists.bin` removed | query OK |
+| Vector segment row deleted from `chroma.sqlite3` | raises, but *"Missing vector segment"* -- different message |
+| Embeddings, queue and metadata purged, segment row kept | query OK |
+
+Chroma 1.5.x rebuilds aggressively from its SQLite metadata, so "the collection is empty" is simply not sufficient to produce this error. **A fix built on that hypothesis would have shipped, been announced as a fix, and the lawyer would have crashed again.**
+
+**Consequences:** v1.0.1 contains the failure rather than curing it, and says so in its release notes. The root cause remains unknown. What ships instead is (a) a guard that holds regardless of cause, (b) a structure-only diagnostic the lawyer can return to us, and (c) the hygiene fixes that were worth making anyway. This entry exists mainly to stop a future session from re-adopting the discarded hypothesis because it sounds plausible.
+
+## 2026-08-31: One unreadable file must not cost a lawyer the other twenty-seven
+**Context:** `search_across_collections` iterated a matter's per-file collections and let any exception propagate. One damaged file therefore failed the entire request, for every cross-document task, permanently — the matter became unusable rather than degraded.
+**Decision:** Per-collection reads are wrapped by `vectorstore._safe`, which converts a failing collection into a skip plus a named entry in a `RetrievalReport`. Applied to **all three** primitives that touch per-file collections, not just the one in the traceback:
+
+  * `search_across_collections` — the reported crash
+  * `retrieve_per_file_by_query` — Compare Clauses
+  * `all_chunks_for` (new) — the pleading limitation scan, which uses `col.get` rather than `col.query`, so guarding the query path alone would have left it live
+
+`_safe` catches broadly, deliberately. Chroma surfaces corrupt segments as `InternalError` with several different messages, and the set is version-dependent; narrowing to known strings would reopen the exact failure the guard exists to prevent.
+
+**Two properties the guard must preserve, both of which cost something:**
+
+*Skipping is only acceptable because it is surfaced.* `retrieve_per_file_by_query`'s docstring previously argued the opposite — "a silent gap in a legal retrieval is worse than a loud failure" — and that reasoning still holds. What changed is that the gap is no longer silent: skipped files are named in a banner **above** the answer, so a lawyer knows the result is partial before they rely on it rather than after. The docstring was rewritten rather than deleted, because the original concern is the one that constrains the design.
+
+*All collections failing raises rather than returning empty.* "Nothing matched your question" and "none of your files could be read" must never look alike: the first is an answer, the second is a broken matter.
+
+The limitation scan gets a stronger treatment still — an unscanned file produces an explicit warning that the review did not clear it, because that gate exists to catch a time-barred claim and a file it could not read is a file it could not clear.
+
+## 2026-08-31: Ingest verifies against the store, not against its own counter
+**Context:** Two related holes. `recreate_collection` runs *before* `upsert_chunks`, so an ingest that dies between them leaves a registered but empty collection. And `needs_index` was computed from `collection_exists`, so a re-upload of that file saw the collection, took the cache path, skipped indexing entirely, and reported success — leaving SQLite claiming "ingested" with nothing behind it.
+**Decision:** Ingest now asks the store what happened rather than trusting an in-process count.
+
+`IngestOutcome.chunk_count` **cannot** be used as the failure signal: it is 0 for a legitimate cache hit as well as for a failed ingest, so keying off it would mark every re-upload of an already-indexed file as broken. `collection_doc_count()` interrogates the collection instead. After indexing, a collection reporting zero documents is deleted and `PdfHasNoText` raised, so a broken collection cannot outlive the failed ingest that created it. On the cache path, a cached collection holding no documents forces a re-index rather than being trusted.
+
+## 2026-08-31: Extraction quality is graded, with thresholds calibrated on real files
+**Context:** "Timeline extracted only 2 events from 28 files" was the lawyer's other complaint, and arguably the one they actually felt. Files were being indexed with OCR output far too poor to answer from, and nothing anywhere said so.
+**Decision:** `assess_extraction()` grades every ingest as `ok`, `ocr_low_quality`, or `failed_no_text`. Thresholds were measured, not guessed, against the nine real scanned and native matter files in the repo:
+
+    good files: 811-4,006 chars/page, legible-character ratio 0.996-1.000
+
+Hence **< 150 chars/page** (a 5x margin below the worst good file) or **< 0.85 legible ratio** (a wide margin below the worst) marks low quality. Verified to produce zero false positives across all nine.
+
+Only OCR'd documents can be graded low quality: a native-text PDF that is genuinely short is short, not damaged, and flagging it would train the lawyer to ignore the badge. A low-quality file stays indexed and queryable — it is a warning, not an exclusion, because whether a clearer scan is worth chasing is the lawyer's call.
+
+Deliberately permissive: a false "low quality" on a sparse covering letter is an annoyance; a false "fine" on 28 unusable files is the bug being fixed.
+
+## 2026-08-31: Startup migration heals manifests, and can never block startup
+**Context:** Installs already in the field carry files marked `ingested` whose collections cannot be read. Those files keep being handed to the query path forever, so the fix has to reach existing state, not just new ingests.
+**Decision:** `maintenance.run_startup_migrations()` runs in the launcher before the server, guarded by a marker file per migration.
+
+Every failure mode is a no-op that retries. **If the store will not open, the manifest is left completely alone** — demoting every file in every matter because Chroma is momentarily unavailable would be far more destructive than the bug. The marker is not written, so it retries next launch; the existing store-health banner already covers the user-visible side. The whole call is wrapped: turning a degraded install into a dead one is strictly worse than the problem being fixed.
+
+The one-time notice goes through `<data_dir>/notices.json` rather than a schema change — the migration runs before Flask, may run when no browser is open, and must not require altering the table it is repairing.
+
+## 2026-08-31: A diagnostic that is safe to send without being read first
+**Context:** With the root cause unknown, the fastest route to it is the state of an affected machine. That machine holds privileged client material.
+**Decision:** `maintenance.build_diagnostic_report()` emits structure only: version, platform, per-file ingest status, collection document counts, and a live probe classifying each collection as ok/missing/empty/unreadable. It **excludes** document text, chunk text, matter names, file names, paths that could carry a client's name, and API keys. File names are reduced to extension and character count.
+
+The constraint driving the design is that a lawyer must be able to send it without auditing it. Anything requiring review before sending would not get sent.
+
+Reachable from a button on the matters page **and** from the error page, per the requirement that a tool nobody can find does not exist. A command-line invocation would not have been used.
+
+## 2026-08-31: Auto-update, failing closed in every direction
+**Context:** v1.0.0 had no update path, so every fix needs manual redistribution to every lawyer, forever.
+**Decision:** A background check against the GitHub releases API at startup, offering the update on the matters page only.
+
+Version comparison is numeric per component and **case-insensitive on the leading v** — the existing release is tagged `V1.0.0` with a capital V, which a naive parser silently never matches. Lexical comparison is wrong for the same class of reason: `v1.0.10` must sort above `v1.0.9`.
+
+Every failure is silent with a one-hour backoff: offline, proxied, rate-limited, malformed JSON, or a release with no installer attached. An update checker that interrupts legal work to complain about its own connectivity is worse than none. Nothing installs without explicit confirmation, and the notification is confined to the matters list — an offer to close the application mid-draft is an offer to lose work.
+
+The acknowledged risk: a bug in the updater is the hardest kind to fix remotely, because it breaks the mechanism you would fix it with. Hence no clever behaviour anywhere in it.
+
+## 2026-08-31: No lawyer sees a raw traceback page
+**Context:** The field report arrived as a screenshot of Flask's "Internal Server Error". Whatever else fails, that page should not be what a legal professional meets mid-matter.
+**Decision:** An app-wide error handler renders an explanatory page with next steps and a diagnostic button, and writes the full traceback to the audit log with matter id, task and path. `HTTPException` passes through untouched so 404s keep their meaning.

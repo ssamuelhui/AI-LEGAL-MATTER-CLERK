@@ -5,6 +5,17 @@ import os
 from openai import OpenAI
 
 
+class MissingAPIKey(RuntimeError):
+    """No OpenRouter credential is configured.
+
+    A distinct type, not a bare RuntimeError, so web.py can turn it into a
+    readable page. Before Phase 3 Session 5 this escaped the request handler
+    and Flask rendered a bare 500: the app started fine without a key and only
+    failed at the moment a lawyer actually ran a task, with the one useful
+    sentence visible in a console window behind the browser.
+    """
+
+
 class LLMClient:
     """Single interface to the configured LLM provider.
 
@@ -23,8 +34,11 @@ class LLMClient:
     ) -> None:
         key = api_key or os.environ.get("OPENROUTER_API_KEY")
         if not key:
-            raise RuntimeError(
-                "OPENROUTER_API_KEY is not set. Add it to .env (see .env.example)."
+            raise MissingAPIKey(
+                "No OpenRouter API key is configured, so drafting and analysis "
+                "tasks cannot run. Close Matter Clerk and start it again with "
+                "the --first-run option to enter your key, or add "
+                "OPENROUTER_API_KEY to your .env file."
             )
         self.api_key = key
         self.model = model or os.environ.get("MODEL", "xiaomi/mimo-v2.5-pro")

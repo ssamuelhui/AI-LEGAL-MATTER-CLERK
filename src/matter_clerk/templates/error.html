@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block subtitle %} &mdash; Something went wrong{% endblock %}
+{% block content %}
+
+<section class="block">
+  <h2>Something went wrong</h2>
+
+  <div class="banner error">
+    <strong>Matter Clerk could not finish that request.</strong>
+    <div style="margin-top:8px;">
+      Nothing in your matter has been changed or lost. Your documents and
+      previous results are unaffected.
+    </div>
+  </div>
+
+  <p>What you can try:</p>
+  <ul>
+    <li>Go back and run the task again &mdash; some failures are temporary.</li>
+    <li>If it fails on one particular file, open the matter and check that
+        file's status. A file marked <em>No readable text</em> or
+        <em>Poor scan quality</em> can be re-processed or re-uploaded.</li>
+    <li>If it keeps happening, create a diagnostic report below and send it on.</li>
+  </ul>
+
+  <div class="metadata">Error type: {{ error_type }} &mdash; the full details
+have been written to your audit log.</div>
+
+  <div style="margin-top:20px;">
+    <a href="{{ url_for('index') }}">&larr; Back to matters</a>
+  </div>
+</section>
+
+<section class="block">
+  <h2>Report this problem</h2>
+  <p class="sub">
+    This creates a file describing the structure of your installation &mdash;
+    how many matters and files you have, and which parts of the search index
+    are healthy. <strong>It contains no document text, no matter names, no file
+    names and no API keys</strong>, so it is safe to send without review.
+  </p>
+  <form method="post" action="{{ url_for('run_diagnostics') }}">
+    <button type="submit">Create diagnostic report</button>
+  </form>
+</section>
+
+{% endblock %}

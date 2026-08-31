@@ -36,6 +36,15 @@
     .cover-note strong { color: #7a0000; }
     .field { margin-bottom: 6px; }
     .banner code  { background: rgba(0,0,0,.05); padding: 1px 4px; border-radius: 3px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 10px;
+             font-size: 11px; font-weight: 600; letter-spacing: .02em;
+             background: #eee; color: #444; }
+    .badge-ok   { background: #e6f4ea; color: #1a7f37; }
+    .badge-warn { background: #fff4d6; color: #7a5200; }
+    .badge-bad  { background: #fdecea; color: #a40e26; }
+    .btn-small  { font-size: 12px; padding: 4px 10px; }
+    .banner.update { background: #eef6ec; border: 1px solid #bcdcb4; color: #24471c; }
+    .banner.update form { display: inline; }
     nav a { color: #1f6feb; text-decoration: none; font-size: 13px; }
     nav a:hover { text-decoration: underline; }
     section.block { margin-top: 28px; }
@@ -103,6 +112,34 @@
     <h1>Matter Clerk</h1>
     <div class="sub">Local document-grounded legal tasks &middot; Day 4 (matters, matter-only)</div>
   </header>
+  {# One-time notices queued by a startup migration (Session 6a). Rendered
+     here rather than per-page so a message survives whichever page the user
+     happens to open first. #}
+  {% for n in notices %}
+  <div class="banner {{ n.kind }}">{{ n.message }}</div>
+  {% endfor %}
+
+  {% if update %}
+  <div class="banner update">
+    <strong>Update available: v{{ update.version }}</strong>
+    {% if update.notes %}
+    <details style="margin-top:6px;">
+      <summary style="cursor:pointer;font-size:13px;">What's new</summary>
+      <div style="margin-top:6px;font-size:13px;white-space:pre-wrap;">{{ update.notes }}</div>
+    </details>
+    {% endif %}
+    <div style="margin-top:10px;">
+      <form method="post" action="{{ url_for('install_update') }}"
+            onsubmit="return confirm('Matter Clerk will close so the installer can run. Continue?');">
+        <button type="submit" class="btn-small">Install now</button>
+      </form>
+      <form method="post" action="{{ url_for('dismiss_update') }}">
+        <button type="submit" class="btn-small">Later</button>
+      </form>
+    </div>
+  </div>
+  {% endif %}
+
   {% block content %}{% endblock %}
 </body>
 </html>

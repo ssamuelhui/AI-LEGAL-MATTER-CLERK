@@ -302,12 +302,70 @@ def add_file_pending(
     return get_file(conn, cur.lastrowid)
 
 
-def mark_file_ingested(conn: sqlite3.Connection, file_id: int) -> None:
+# --------------------------------------------------------------------------
+# Ingest status vocabulary (Session 6a)
+#
+#   ingested         indexed and queryable
+#   ocr_low_quality  indexed and queryable, but the OCR output looks too poor
+#                    to answer from -- a warning, not an exclusion
+#   failed_no_text   nothing searchable was produced; NOT queryable
+#   failed           ingestion raised
+#
+# Only the first two are queryable. `failed_no_text` is separate from `failed`
+# because it is actionable in a specific way -- re-scan and re-upload -- and
+# because the migration backfill needs to distinguish files it demoted from
+# files that failed outright at upload time.
+# --------------------------------------------------------------------------
+QUERYABLE_STATUSES = ("ingested", "ocr_low_quality")
+
+STATUS_LABELS = {
+    "ingested": "Ready",
+    "ocr_low_quality": "Poor scan quality",
+    "failed_no_text": "No readable text",
+    "failed": "Ingest failed",
+    "pending": "Not yet processed",
+}
+
+
+def is_queryable(status: str) -> bool:
+    return status in QUERYABLE_STATUSES
+
+
+def mark_file_ingested(
+    conn: sqlite3.Connection, file_id: int, status: str = "ingested",
+    note: str | None = None,
+) -> None:
+    """Record a successful ingest. `status` may be 'ingested' or
+    'ocr_low_quality'; the latter stays queryable but carries a warning."""
+    if status not in QUERYABLE_STATUSES:
+        raise ValueError(f"not a queryable status: {status!r}")
     conn.execute(
-        "UPDATE files SET ingest_status = 'ingested', ingested_at = ?, "
-        "ingest_error = NULL WHERE id = ?",
-        (_now(), file_id),
+        "UPDATE files SET ingest_status = ?, ingested_at = ?, "
+        "ingest_error = ? WHERE id = ?",
+        (status, _now(), (note or None), file_id),
     )
+    conn.commit()
+
+
+def mark_file_no_text(conn: sqlite3.Connection, file_id: int, note: str) -> None:
+    """Mark a file as having produced nothing searchable."""
+    conn.execute(
+        "UPDATE files SET ingest_status = 'failed_no_text', ingest_error = ? "
+        "WHERE id = ?",
+        (note[:2000], file_id),
+    )
+    conn.commit()
+
+
+def delete_file(conn: sqlite3.Connection, file_id: int) -> None:
+    """Remove a file row from a matter. The stored artifact and any vector
+    collection are the caller's to clean up."""
+    row = get_file(conn, file_id)
+    conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
+    if row is not None:
+        conn.execute(
+            "UPDATE matters SET modified_at = ? WHERE id = ?", (_now(), row.matter_id)
+        )
     conn.commit()
 
 

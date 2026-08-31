@@ -79,6 +79,9 @@ hiddenimports += [
     "markdown", "bleach", "yaml", "dotenv", "platformdirs",
     "docx", "reportlab", "openpyxl", "pypdf", "pdf2image", "pytesseract",
     "PIL", "PIL.Image",
+    # First-run wizard (Session 5).
+    "tkinter", "tkinter.ttk", "tkinter.messagebox",
+    "matter_clerk.first_run_wizard",
 ]
 
 # Several libraries look up their own distribution version at import time.
@@ -105,7 +108,10 @@ excludes = [
     "transformers", "sentence_transformers",
     "scipy", "sklearn", "scikit-learn",
     "matplotlib", "pandas", "notebook", "IPython", "jupyter",
-    "tkinter", "test", "unittest",
+    # NB: tkinter is NOT excluded. Session 5 added the first-run wizard,
+    # which is a tkinter dialog -- excluding it produces a bundle that
+    # launches fine and then fails only on a machine with no .env.
+    "test", "unittest",
 ]
 
 a = Analysis(

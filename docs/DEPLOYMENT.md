@@ -20,7 +20,7 @@ From the project root, on Windows:
 That is the whole build. It stages the vendored binaries, downloads the
 embedding model if absent, runs PyInstaller, and prints the output size.
 
-Result: `dist\MatterClerk\MatterClerk.exe` — about **542 MB across 1212 files**.
+Result: `dist\MatterClerk\MatterClerk.exe` — about **673 MB across 2146 files**.
 
 Useful flags:
 
@@ -52,7 +52,7 @@ Pinned versions, asserted by `scripts\stage_vendor.ps1`:
 
 | Component | Version | Source | Signed |
 |---|---|---|---|
-| Tesseract OCR | 5.5.0.20241111 | [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki) | Yes (Authenticode) |
+| Tesseract OCR | 5.5.3.20260724 | [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki) | Yes (Authenticode) |
 | Poppler | 26.02.0 | [oschwartz10612/poppler-windows](https://github.com/oschwartz10612/poppler-windows/releases) | **No** |
 
 No signed Poppler build for Windows exists short of compiling it yourself. Code
@@ -76,18 +76,18 @@ shipping something different.
 
 ## 3. What gets bundled, and why it is that size
 
-`vendor\` and `models\` are gitignored — together they are ~230 MB of binaries
+`vendor\` and `models\` are gitignored — together they are ~295 MB of binaries
 that do not belong in git history. `vendor\VERSIONS.txt`, written by the
 staging script, records exactly what was used.
 
 | Component | Size | Purpose |
 |---|---|---|
 | bge-small-en-v1.5 (ONNX + tokenizer) | 128 MB | Local embeddings |
-| Tesseract + Poppler + tiktoken cache | 99 MB | OCR, PDF rendering, tokenization |
+| Tesseract + Poppler + tiktoken cache | 163 MB | OCR, PDF rendering, tokenization |
 | chromadb + `chromadb_rust_bindings` | 67 MB | Embedded vector store |
 | onnxruntime | 40 MB | Embedding inference |
-| Python runtime, Flask, exports, numpy, etc. | ~208 MB | Everything else |
-| **Total** | **542 MB** | |
+| Python runtime, Flask, exports, numpy, tkinter, etc. | ~212 MB | Everything else |
+| **Total** | **673 MB** | |
 
 Everything is bundled rather than downloaded on first run. The users are
 lawyers on corporate networks with HTTPS inspection, proxies, and blocked
@@ -245,3 +245,258 @@ thing to check.
 
 Skipping the staging and download steps takes the build to about four minutes.
 Both are only needed when the binaries or the model change.
+
+---
+
+## 9. Building the installer
+
+Session 5 wraps the bundle in a per-user Windows installer. Run the bundle
+build first, then:
+
+```powershell
+.\build_windows.ps1 -SkipVendor -SkipModel
+.\installer\build_installer.ps1
+```
+
+Result: `installer\output\MatterClerk-Setup.exe` — **196.6 MB**, compressed
+from the 673 MB bundle (29.2%). Compression is LZMA2/ultra64 with
+`SolidCompression=yes`, which is what makes that ratio possible: the solid
+stream deduplicates the ~90 MB of DLLs that appear twice in the bundle.
+
+The script takes about six minutes, almost all of it compression. It finds
+Inno Setup at `C:\Program Files\Inno Setup 7\ISCC.exe`, falling back to the
+standard Inno 6 locations; pass `-ISCC` for anything else. Pass `-Version` to
+override the `1.0.0` baked into the script.
+
+### Prerequisites
+
+Inno Setup 7 (or 6) from <https://jrsoftware.org/isdl.php>. The compiler prints
+"Non-commercial use only", which is correct for this deployment.
+
+---
+
+## 10. What the installer does
+
+| | |
+|---|---|
+| Installs to | `%LOCALAPPDATA%\Programs\MatterClerk` |
+| Data stays in | `%LOCALAPPDATA%\MatterClerk` |
+| Privileges | Per-user; **no UAC prompt, no admin rights** |
+| Add/Remove Programs | Registered as "Matter Clerk 1.0.1" |
+| Shortcuts | Start Menu (default on), Desktop (default off) |
+
+Per-user is deliberate: corporate laptops routinely block admin installs, and
+per-user works everywhere. `PrivilegesRequiredOverridesAllowed=commandline`
+leaves the door open for a machine-wide IT rollout later without editing the
+script.
+
+The two directories are deliberately distinct, so uninstalling the application
+never implies deleting a lawyer's matters.
+
+### Screens
+
+Welcome → Licence (terms; must accept) → Install location → Shortcut options →
+Ready to install → Installing → Finished, with "Launch Matter Clerk" ticked.
+
+The installer runs `MatterClerk.exe` plainly. The launcher itself detects a
+missing `.env` and shows the first-run wizard, so one code path covers both a
+fresh install and a reinstall over a configured one.
+
+### First-run wizard
+
+A tkinter dialog, not a web page — deliberately. The wizard must appear at the
+one moment the user cannot recover if it does not, and a browser-served wizard
+would depend on the shell-launch browser-open path that `docs/BACKLOG.md`
+records as intermittently failing. It looks dated; it appears every time.
+
+It collects the OpenRouter key (required) and CanLII key (optional), tests them
+on a background thread so the window never freezes, and writes
+`%LOCALAPPDATA%\MatterClerk\.env` with both keys plus
+`MODEL=xiaomi/mimo-v2.5-pro`. The file is then locked down with `icacls` to the
+current user, since it holds live credentials.
+
+On save the dialog closes and the app starts in the same process — no
+subprocess, no second console, nothing to orphan. Cancel exits without writing.
+
+To reconfigure keys later:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\MatterClerk\MatterClerk.exe" --first-run
+```
+
+The OpenRouter key is tested against `GET /api/v1/key`, **not** `GET /models`.
+`/models` is unauthenticated and returns HTTP 200 for a fabricated key —
+verified during this session — so testing against it would tell a lawyer their
+bad key was fine.
+
+---
+
+## 11. Uninstalling
+
+Settings → Apps → Matter Clerk → Uninstall, or the entry in Add/Remove
+Programs.
+
+**Matter data is kept by default.** Before anything is removed, the uninstaller
+asks whether to also delete `%LOCALAPPDATA%\MatterClerk`. "No" is the default
+button on that prompt, and choosing "Yes" raises a second confirmation that
+also defaults to "No". Deleting client documents and the audit log has to be
+chosen twice, deliberately.
+
+This runs in `InitializeUninstall`, before any file is touched — not as a
+checkbox on the progress form, which appears only after the user has already
+committed to uninstalling, where a mis-click would be unrecoverable.
+
+Keeping the data means a later reinstall picks up every matter, the search
+index, and the existing `.env` — so the wizard does not reappear.
+
+---
+
+## 12. Installer test plan
+
+Verified on the build machine: compilation, installer size, the wizard gating
+startup in the bundled exe, tcl/tk resources present, key validation against
+both live APIs. **Not** verified here — these need a real install cycle:
+
+| # | Test | Pass criterion |
+|---|---|---|
+| 1 | Run `MatterClerk-Setup.exe` | SmartScreen warns (expected, unsigned): More info → Run anyway |
+| 2 | Wizard screens | Welcome, licence, location, shortcuts, ready, installing, finished |
+| 3 | No UAC prompt | Never appears at any point |
+| 4 | Install location | Files land in `%LOCALAPPDATA%\Programs\MatterClerk` |
+| 5 | Start Menu shortcut | "Matter Clerk" present and launches |
+| 6 | First-run wizard appears | tkinter dialog, before any browser or server |
+| 7 | Test connections | OpenRouter passes; CanLII passes or reports optional |
+| 8 | Bad key feedback | Paste a wrong key: rejected clearly, not "cannot reach" |
+| 9 | Save and start | `.env` written; app starts; browser opens |
+| 10 | Run a real task | Query with citations works end to end |
+| 11 | OCR from installed copy | Scanned PDF OCRs via the installed vendored binaries |
+| 12 | Install dir stays clean | Nothing new written under `Programs\MatterClerk` after use |
+| 13 | Relaunch from shortcut | Starts directly; **no** wizard second time |
+| 14 | Add/Remove Programs | "Matter Clerk 1.0.1" listed with working uninstall |
+| 15 | **Uninstall, keep data** | Answer No: app gone, `%LOCALAPPDATA%\MatterClerk` intact |
+| 16 | Reinstall | Matters still present, no wizard (`.env` survived) |
+| 17 | **Uninstall, delete data** | Answer Yes twice: data directory gone |
+
+Tests 15-17 are the ones worth doing slowly — 15 and 17 are the whole point of
+the confirmation design, and 16 is what proves 15 actually preserved something
+usable rather than just leaving a folder behind.
+
+Close Matter Clerk before uninstalling. A running instance holds its bundled
+DLLs open, and the uninstaller will report files it could not remove.
+
+---
+
+## 13. Releasing a new version (v1.0.1 onward)
+
+The app version lives in **one** place: `__version__` in
+`src/matter_clerk/__init__.py`. `installer/matter_clerk.iss` carries a matching
+`AppVersion`, and `updater.py` reads the package value to compare against
+GitHub.
+
+Do not confuse this with `<data_dir>/version.txt`, which is the data-directory
+*layout* version (`paths.DATA_DIR_VERSION`) and moves independently — it says
+how the folder is arranged, not which release wrote it.
+
+```powershell
+# 1. bump both, keeping them in step
+#    src\matter_clerk\__init__.py   __version__ = "1.0.2"
+#    installer\matter_clerk.iss     #define AppVersion "1.0.2"
+
+# 2. rebuild
+.\build_windows.ps1 -SkipVendor -SkipModel
+.\installer\build_installer.ps1
+
+# 3. publish
+#    Create a GitHub Release tagged v1.0.2 and attach
+#    installer\output\MatterClerk-Setup.exe under exactly that name.
+```
+
+The asset **must** be named `MatterClerk-Setup.exe`. The updater looks for that
+name and stays silent if it is absent, so a release with a differently-named
+asset simply never reaches anyone.
+
+Tags may be `v1.0.2` or `V1.0.2` — comparison is case-insensitive and numeric
+per component, so `v1.0.10` correctly outranks `v1.0.9`. Drafts and
+pre-releases are ignored.
+
+The release body becomes the "What's new" text in the in-app notification, so
+write its first paragraph to stand alone. See `docs/RELEASE_NOTES_v1.0.1.md`.
+
+### How updating behaves
+
+Checked once at startup on a background thread, offered on the matters page
+only — never over a result, never mid-task. Offline, proxied, rate-limited or
+malformed responses fail silently with a one-hour backoff. Nothing downloads or
+installs without explicit confirmation. "Later" dismisses for the session.
+
+To test the path without publishing, temporarily lower `__version__` and start
+the app: the live `V1.0.0` release will be offered.
+
+---
+
+## 14. File status and recovery
+
+Every file in a matter carries an ingest status, shown in the file list:
+
+| Status | Searchable | Meaning |
+|---|---|---|
+| **Ready** | yes | Indexed normally |
+| **Poor scan quality** | yes | OCR output below the quality thresholds; answers may be thin |
+| **No readable text** | **no** | Nothing searchable was produced; excluded from every task |
+| **Ingest failed** | **no** | Ingestion raised |
+
+Quality thresholds are in `pipeline.assess_extraction`: under 150 characters
+per page, or under an 0.85 legible-character ratio, on a document where OCR
+contributed. Calibrated against the nine real matter files in this repo, which
+measured 811–4,006 chars/page at 0.996–1.000 legible.
+
+Anything not "Ready" gets a **Re-process** button, which rebuilds the index
+from the copy already stored. Matters with several unreadable files offer a
+bulk removal — which removes them from the matter list only; the stored
+documents are left on disk deliberately.
+
+If a task cannot read some files, the result page says so **above** the answer:
+"Retrieved from 26 of 28 files…". A lawyer needs to know a result is partial
+before they rely on it, not after.
+
+---
+
+## 15. The diagnostic report
+
+For any install behaving oddly. Matters page → **Having trouble?** → **Create
+diagnostic report**; also on the error page. Writes a timestamped JSON file
+into the data directory and tells the user where.
+
+**Contains:** app and chromadb versions, platform, whether the store and
+database open, per-matter file counts, each file's ingest status, collection
+document counts, and a probe classifying each collection as
+`ok` / `missing` / `empty` / `unreadable`.
+
+**Contains none of:** document text, chunk text, matter names, file names,
+client names, paths that could carry a client's name, or API keys. File names
+are reduced to extension and character count.
+
+That exclusion list is the design constraint, not a side effect: a lawyer has
+to be able to send the file without auditing it first, or it will not be sent.
+
+**Reading one:** check `chromadb_version` against the build machine first, then
+`summary.by_probe`. A collection probing `unreadable` while reporting a
+non-zero `doc_count` is the signature behind the open root-cause item in
+`docs/BACKLOG.md` — that combination has not been reproducible in the lab.
+
+---
+
+## 16. Startup migrations
+
+`maintenance.run_startup_migrations()` runs in the launcher before the server,
+once per install, tracked by marker files in `<data_dir>/migrations/`.
+
+`0001_backfill_ingest_status` reconciles the matter manifest against the vector
+store: any file marked queryable whose collection is missing, empty or
+unreadable is demoted to "No readable text" and the user is told once, via
+`<data_dir>/notices.json`.
+
+It cannot block startup. If the store will not open the manifest is left
+untouched and the marker is not written, so it retries next launch — demoting
+every file in every matter because Chroma was briefly unavailable would be far
+worse than the problem. To force a re-run, delete the marker file.

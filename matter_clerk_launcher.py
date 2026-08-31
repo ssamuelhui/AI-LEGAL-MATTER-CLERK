@@ -15,10 +15,13 @@ Sequence:
   3. Load .env from the data directory first, then the repo root. First value
      wins, so an installed .env is authoritative and a developer checkout still
      picks up its own.
-  4. Start Flask on 127.0.0.1:5050 and open a browser once /healthz answers.
+  4. Show the first-run wizard if .env is absent (or --first-run is passed),
+     then start Flask on 127.0.0.1:5050 and open a browser once /healthz
+     answers. The wizard runs in THIS process and simply returns, so a
+     configured app continues straight into startup with nothing to spawn.
 
 Usage:
-    MatterClerk.exe [--no-browser]
+    MatterClerk.exe [--no-browser] [--first-run]
 """
 
 from __future__ import annotations
@@ -105,7 +108,17 @@ def main(argv: list[str] | None = None) -> int:
     # --- 2. data directory ---------------------------------------------------
     data_dir = paths.ensure_data_dir()
 
-    # --- 3. environment ------------------------------------------------------
+    # --- 3. first-run wizard -------------------------------------------------
+    # Must run BEFORE load_dotenv: the wizard is what creates the .env that
+    # load_dotenv is about to read.
+    from matter_clerk import first_run_wizard
+
+    if "--first-run" in argv or first_run_wizard.needs_wizard():
+        if not first_run_wizard.run_wizard():
+            print("Setup cancelled -- no configuration was saved.", flush=True)
+            return 0
+
+    # --- 4. environment ------------------------------------------------------
     from dotenv import load_dotenv
 
     # load_dotenv does not override already-set variables, so the first file to
@@ -114,7 +127,21 @@ def main(argv: list[str] | None = None) -> int:
     if not paths.is_frozen():
         load_dotenv(paths.repo_root() / ".env")
 
-    # --- 4. server -----------------------------------------------------------
+    # --- 5. one-time migrations ----------------------------------------------
+    # Runs before the server so a repaired manifest is what the first page
+    # renders. Never raises: a migration that cannot run is retried next
+    # launch, and a store that will not open is left to the health banner --
+    # turning a degraded install into a dead one would be strictly worse.
+    from matter_clerk import maintenance
+
+    maintenance.run_startup_migrations()
+
+    # --- 6. update check (background, silent on failure) ----------------------
+    from matter_clerk import updater
+
+    updater.start_background_check()
+
+    # --- 7. server -----------------------------------------------------------
     import logging
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")

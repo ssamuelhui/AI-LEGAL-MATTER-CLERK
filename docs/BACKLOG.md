@@ -16,6 +16,27 @@ The point of this file is to record decisions we *consciously* punted on, so the
 
 ---
 
+## Root cause of "Nothing found on disk" is still unknown
+**Deferred from:** Phase 3 Session 6a (August 31, 2026)
+**Trigger to revisit:** As soon as a diagnostic report arrives from any affected install — that is the whole point of shipping the tool. Also revisit on any chromadb upgrade, which could change the failure surface in either direction.
+
+**Context:** A pilot lawyer on v1.0.0 hit `chromadb.errors.InternalError: Error executing plan: Internal error: Error creating hnsw segment reader: Nothing found on disk`, raised from `search_across_collections` over a 28-file matter. v1.0.1 **contains** this failure — one unreadable collection is now skipped and reported instead of failing the request — but does not cure it, because the cause was never identified.
+
+Eight corruption shapes were constructed and probed on chromadb 1.5.9; none reproduced it. Full table in ARCHITECTURE (2026-08-31, "The reported root cause was tested and does not hold"). The short version: an empty or physically damaged collection queries cleanly, because Chroma 1.5.x rebuilds from its SQLite metadata. Deleting the vector segment row *does* raise, but with a different message ("Missing vector segment").
+
+So something on that machine put the store into a state not reachable by any of: empty collection, missing segment directory, emptied segment directory, truncated segment files, removed index files, or purged embedding tables.
+
+**Hypotheses not yet tested**, roughly in order of plausibility:
+- **A different chromadb version.** The most likely explanation by far, and the cheapest to check — the diagnostic report records `chromadb_version`, so the first report will settle it. If the lawyer's bundle carries a different version than the build machine's, the whole investigation collapses to a version pin.
+- **Concurrent access.** Embedded Chroma is single-writer (see the 2026-08-30 vectorstore note). The launcher's port probe stops a second instance on the default port, but not two instances on different `MATTER_CLERK_PORT` values against one data directory.
+- **Antivirus or backup interference** mid-write, producing a partial state that differs from any of the clean deletions simulated here. Endpoint protection on a legal firm's laptop is a real variable, and the bundle is unsigned.
+- **Disk exhaustion during a 28-file OCR ingest**, which writes a lot: partial segment writes plus a partial SQLite commit is a shape not covered above.
+- **A Chroma-internal state** — compaction, `max_seq_id` bookkeeping, or the `embeddings_queue` — reachable only through a specific sequence of operations rather than by editing the store from outside.
+
+**What to do when a report arrives:** compare `chromadb_version` against the build machine first; then `summary.by_probe`, which classifies every collection as ok/missing/empty/unreadable. An `unreadable` collection whose `doc_count` is non-zero is the signature to chase — that combination was not reproducible here.
+
+**Do not** close this out on the grounds that the crash stopped being reported. The guard makes it invisible to the user; silence is now expected, and is no longer evidence that it is gone.
+
 ## Auto-open browser sometimes fails on double-click launch
 **Deferred from:** Phase 3 Session 3 verification (August 2026)
 **Trigger to revisit:** Session 5 (the installer creates a Start Menu shortcut, which is a shell launch — the same context that fails, so the installer makes this the *default* path rather than an edge case). Sooner if a lawyer reports it.
@@ -33,6 +54,31 @@ The point of this file is to record decisions we *consciously* punted on, so the
 - **Surface the URL better and stop treating auto-open as load-bearing.** Print the URL prominently, and have the installer's shortcut point at a `.url` file or a one-line launcher that opens the browser itself. Worth doing *regardless* of which fix is chosen: the browser can fail to open for reasons entirely outside our control (no default browser registered, locked-down machine), and the console should never leave the user without a next step.
 
 **Check while in here:** whether the failure is actually intermittent or is fully determined by launch context. "Sometimes" from a handful of double-clicks may just be an unrecognised deterministic trigger — for example first-launch-after-boot, or whether a browser process is already running. Nailing that down first will make the fix much easier to verify, since an intermittent bug that is really deterministic is easy to declare fixed by accident.
+
+## ~90 MB of duplicated DLLs in the packaged bundle
+**Deferred from:** Phase 3 Session 5 (August 31, 2026)
+**Trigger to revisit:** If bundle or install footprint is ever complained about, or when the vendored Tesseract version is next changed (the staging script is the natural place to fix it). Not urgent — the compressed installer barely notices.
+
+**Context:** Three large DLLs ship twice in `dist\MatterClerk\`, byte-identical in both places:
+
+| DLL | Size | Locations |
+|---|---|---|
+| `libicudt78.dll` | 33.1 MB | `_internal\` and `_internal\vendor\tesseract\` |
+| `libicudt75.dll` | 30.7 MB | same |
+| `libstdc++-6.dll` | 26.4 MB | same |
+
+That is ~90 MB of a 673 MB bundle, permanently occupying a lawyer's disk after install.
+
+The cause is PyInstaller 6 behaviour: it detects PE files listed in `datas` and hoists them into the top-level `_internal\`, while the vendored copies remain where `scripts\stage_vendor.ps1` put them. Both are needed as things stand — `tesseract.exe` resolves its DLLs relative to its own directory, so the `vendor\tesseract\` copies are the ones OCR actually uses, and the hoisted copies are PyInstaller's own dependency bookkeeping.
+
+**Not fixed in Session 5, deliberately.** The change would be to DLL placement, immediately before shipping an installer, in the one subsystem (OCR through a spawned executable) that fails in a way unit tests do not catch. The compressed cost turned out to be near zero anyway: `SolidCompression=yes` with LZMA2 deduplicates the identical streams, and the installer came out at 196.6 MB — 29.2% of the bundle, better than the 300-400 MB that was estimated before compression was measured. The cost is disk footprint after install, not download size.
+
+**Options when revisited:**
+- Add the three DLL names to a PyInstaller exclusion so they are not hoisted, keeping only the `vendor\tesseract\` copies. Cheapest, but needs an OCR test from the installed copy to confirm nothing else was depending on the hoisted ones.
+- Stop shipping the duplicate ICU data by checking whether Tesseract 5.5.3 genuinely needs both `libicudt75` and `libicudt78` — two major ICU versions in one install looks like an upstream packaging artifact rather than a real requirement. Would need testing against real scanned documents, not just a smoke test.
+- Leave it. 90 MB on a modern laptop against the risk of breaking OCR for a lawyer mid-matter is a defensible trade, and the compressed download is unaffected.
+
+**Check first when revisited:** whether the duplication still exists at all. It is a side effect of how PyInstaller 6 treats binaries in `datas`, and could change in either direction on a PyInstaller upgrade.
 
 ## Statutory authority in authority mode (Condominium Act, Limitations Act, etc.)
 **Deferred from:** Phase 2b polish (August 28, 2026)

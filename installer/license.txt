@@ -1,0 +1,69 @@
+Matter Clerk 1.0.0
+Terms of Use
+
+PLEASE READ BEFORE INSTALLING.
+
+1. WHAT THIS IS
+
+Matter Clerk is a private, document-grounded drafting and research assistant
+for Canadian legal work. It is supplied to a named practitioner for use in
+their own practice. It is not a public product and is not licensed for
+redistribution.
+
+2. EVERYTHING IT PRODUCES IS A DRAFT
+
+Every document, memo, summary, timeline and case list Matter Clerk produces is
+a DRAFT requiring review by a licensed lawyer before it is relied on, filed,
+or sent to anyone. The software marks its output accordingly, and that marking
+must not be removed.
+
+Matter Clerk cites its sources so that you can check them. Checking them is
+your responsibility, not the software's. Do not rely on a citation you have not
+read.
+
+3. NOT LEGAL ADVICE
+
+Matter Clerk does not practise law and does not give legal advice. It has no
+solicitor-client relationship with anyone. Professional judgement, and
+responsibility for the work, remain entirely with the practitioner.
+
+4. YOUR DATA
+
+Matter documents you add are stored on this computer only, in your user
+profile. They are not uploaded anywhere by the software except as follows: to
+answer a question, the relevant excerpts of your documents are sent to the
+configured AI provider (OpenRouter by default), and case-law searches are sent
+to CanLII. Both are third parties with their own terms and privacy practices.
+
+Consider your professional obligations regarding client confidentiality before
+using this software on privileged material.
+
+5. NO WARRANTY
+
+This software is provided "AS IS", without warranty of any kind, express or
+implied, including but not limited to the warranties of merchantability,
+fitness for a particular purpose and non-infringement. In no event shall the
+author be liable for any claim, damages or other liability arising from the
+software or its use.
+
+6. THIRD-PARTY COMPONENTS
+
+This installer includes the following, under their own licences:
+
+  Tesseract OCR          Apache License 2.0
+  Poppler                GNU General Public License v2
+  BAAI/bge-small-en-v1.5 MIT License
+  ONNX Runtime           MIT License
+  ChromaDB               Apache License 2.0
+  Python and its standard library
+                         Python Software Foundation License
+
+Their respective licence terms govern those components.
+
+7. UNSIGNED INSTALLER
+
+This installer is not code-signed. Windows SmartScreen will warn you before it
+runs. That warning is expected. Only proceed if you obtained this installer
+directly from its author.
+
+Installing indicates that you accept these terms.
