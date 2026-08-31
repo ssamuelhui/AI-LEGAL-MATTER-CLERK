@@ -184,6 +184,49 @@ def add_cover_note_box(doc) -> None:
             r.font.size = Pt(9.5)
 
 
+def add_authority_disclaimer(doc, payload) -> None:
+    """The Phase-2b authority disclaimer, plus this run's verification summary.
+
+    A bordered, tinted single-cell table for the same reason the cover note is
+    one: it must read as a distinct instrument and its border must survive being
+    pasted into another document. An exported memo can be forwarded to someone
+    who never saw the result page, so the file has to carry the caveat itself.
+    """
+    from .. import verification
+
+    table = doc.add_table(rows=1, cols=1)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    cell = table.cell(0, 0)
+    shade_cell(cell, "FFF4E5")
+    set_cell_borders(cell, size=16, color="D97706")  # 2pt amber
+
+    p = cell.paragraphs[0]
+    run = p.add_run("CITATION VERIFICATION")
+    run.bold = True
+    run.font.size = Pt(9)
+    run.font.color.rgb = RGBColor(0x6B, 0x3A, 0x00)
+
+    body = cell.add_paragraph()
+    _write_runs(body, verification.AUTHORITY_DISCLAIMER)
+    for r in body.runs:
+        r.font.size = Pt(9.5)
+        r.font.color.rgb = RGBColor(0x6B, 0x3A, 0x00)
+
+    if payload.verification_summary:
+        summary = cell.add_paragraph()
+        text = payload.verification_summary
+        if payload.verification_incomplete:
+            text += (
+                " — verification did not complete; citations marked "
+                "[UNVERIFIED] were not checked."
+            )
+        run = summary.add_run(f"This draft: {text}.")
+        run.bold = True
+        run.font.size = Pt(9)
+        run.font.color.rgb = RGBColor(0x6B, 0x3A, 0x00)
+    doc.add_paragraph()
+
+
 def add_heading(doc, text: str, level: int = 2) -> None:
     p = doc.add_paragraph()
     p.paragraph_format.space_before = Pt(12 if level <= 2 else 8)

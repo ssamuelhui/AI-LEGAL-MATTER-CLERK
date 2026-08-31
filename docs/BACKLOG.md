@@ -16,6 +16,22 @@ The point of this file is to record decisions we *consciously* punted on, so the
 
 ---
 
+## Statutory authority in authority mode (Condominium Act, Limitations Act, etc.)
+**Deferred from:** Phase 2b polish (August 28, 2026)
+**Trigger to revisit:** Phase 3, or sooner if lawyer testing shows Draft Memo answers on statute-driven issues are dominated by `[AUTHORITY REQUIRED]` markers. The procedure tracker's rule-source fetching (SoW §4.5) is the natural place to build the retrieval channel this needs — revisit when that work starts, since the two share a fetcher.
+
+**Context:** Authority mode authorizes **case citations only**. Rule 2 of `AUTHORITY_MODE_INSTRUCTION` requires a neutral citation (`2020 ONCA 471`) so the citation can be resolved against CanLII's `caseBrowse` endpoint — and no statute has one. This surfaced while measuring the reasonable-confidence recalibration (see ARCHITECTURE 2026-08-28): on a Draft Memo query about a condominium corporation's repair obligation, both MiMo Pro and Claude Opus 4.8 produced **zero** citations, and every `[AUTHORITY REQUIRED — lawyer to confirm]` marker across four runs named a *statutory* proposition — *Condominium Act, 1998* ss. 56, 89–91; *Limitations Act, 2002*; the *Insurance Act*. A control query whose governing authority is case law drew four verified citations from the same model under the same prompt, confirming the gap is the authority *type*, not the prompt or the model.
+
+The models were behaving correctly. A real Ontario legal memo is very often statute-first with cases interpreting the statute, so this is not an edge case — it is a large fraction of the work the Draft Memo task exists to do, and today that fraction comes back as gap markers.
+
+**This is not fixable by prompt.** The project's governing rule (CLAUDE.md; SoW §4.3) is that the system never cites authority it has not retrieved, and the whole point of Phase 2b is that a citation is only as good as the check behind it. Letting the model state statutory content from training knowledge would reintroduce exactly the hallucination risk the phase was built to close, and there is no CanLII-style existence check for "s. 89(5) says X" — the failure mode for statutes is *misquotation*, not *non-existence*, so an existence check would not even be the right instrument.
+
+**Options under consideration:**
+- **Retrieve statute text and inject it, like matter documents.** CanLII has a `legislationBrowse` API covering Ontario statutes and regulations; fetched section text goes into CONTEXT with a `[SOURCE: ...]` locator and the model cites it the same way it cites a matter document. Strongest option: it makes statutory citation *grounded* rather than *checked*, which is the stronger guarantee, and it reuses the existing citation pipeline rather than adding a parallel one. Cost: a section-level retrieval design (a memo needs ss. 89–91, not the whole Act) and cache-freshness rules, since statute text is amended.
+- **A separate verification path for statutory citations** — model cites `Condominium Act, 1998, s. 89(5)`, code fetches that section and compares the model's characterisation against the real text. Weaker than injection (it checks a claim after the fact rather than grounding it) and the comparison step is itself an LLM judgment call.
+- **A distinct `[STATUTE REQUIRED — lawyer to confirm: <section>]` marker**, narrower than the current generic one. Does not close the gap, but makes it legible: a lawyer skimming a memo could see at a glance that the missing authority is a specific statutory section they can look up in seconds, rather than an open-ended research task. Cheap, and worth doing regardless of which of the above is chosen.
+- **Leave as-is.** Defensible only while authority mode is understood as a case-law feature. The UI now says so: the radio reads "Matter + CanLII **case** authority" with the helper line "Verifies case citations against CanLII. Statutory authority still requires manual verification." (August 28, 2026). That makes the limit honest but does not close it — a lawyer who needs s. 89 of the *Condominium Act* still gets a gap marker.
+
 ## CLI matter query subcommand
 **Deferred from:** Phase 1 Day 4b (June 25, 2026)
 **Trigger to revisit:** When matter work needs to be scriptable/automatable from the terminal (batch runs, CI-style regression over a matter, or a user who prefers the CLI for matters) — or whenever the next CLI pass touches `_matter_main`.

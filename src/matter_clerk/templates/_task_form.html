@@ -138,6 +138,37 @@
                  placeholder="{{ f.placeholder or '' }}"
                  value="{{ values.get(f.name) if is_active else '' }}"
                  {% if f.required %}data-required="1"{% endif %}>
+        {% elif f.type == "radio" %}
+          {# Radio, not a select: a select hides the option not chosen, and a #}
+          {# lawyer must be able to SEE that authority mode exists and that it #}
+          {# is not the default before deciding. First option is the default.  #}
+          <div class="radio-set">
+            {% for opt in f.options %}
+            <label class="inline radio-opt">
+              <input type="radio" name="{{ f.name }}" value="{{ opt }}"
+                     {% if (is_active and values.get(f.name) == opt)
+                           or (not (is_active and values.get(f.name)) and loop.first) %}checked{% endif %}>
+              {{ opt }}
+            </label>
+            {% endfor %}
+          </div>
+          {% if f.name == 'authority_mode' %}
+          {# Always visible, unlike the banner below: this states what the mode
+             COVERS, so it has to be readable while the lawyer is still choosing.
+             Authority mode verifies case citations only -- a statute has no
+             neutral citation and so cannot be checked the way a case can. #}
+          <div class="hint">
+            Verifies case citations against CanLII. Statutory authority still
+            requires manual verification.
+          </div>
+          {# Shown before the run, so the caveat is read before tokens are spent. #}
+          <div class="banner warn authority-hint" hidden>
+            In this mode the draft may cite real cases. Every citation is checked
+            against CanLII and any that does not exist is removed from the draft.
+            <strong>Verification confirms a case exists — not that it held what
+            the draft says.</strong>
+          </div>
+          {% endif %}
         {% elif f.type == "number" %}
           {# min/max/value are convenience only: the task re-clamps server-side. #}
           <input id="{{ t.id }}_{{ f.name }}" name="{{ f.name }}" type="number"
@@ -271,6 +302,7 @@
         setControls(g, active);
         if (active) {
           updateConditionals(g);
+          updateAuthorityHint(g);
           ok = updateCompareGate(g);
         }
       });
@@ -291,8 +323,20 @@
       if (submitBtn) submitBtn.disabled = !ok;
     }
 
+    // Phase 2b: reveal the authority-mode caveat as soon as the mode is
+    // selected, so it is read before the run rather than after.
+    function updateAuthorityHint(group) {
+      var hint = group.querySelector(".authority-hint");
+      if (!hint) return;
+      var on = group.querySelector("input[name='authority_mode']:checked");
+      hint.hidden = !(on && on.value.indexOf("CanLII") !== -1);
+    }
+
     taskSelect.addEventListener("change", update);
     groups.forEach(function (g) {
+      g.querySelectorAll("input[name='authority_mode']").forEach(function (r) {
+        r.addEventListener("change", function () { updateAuthorityHint(g); });
+      });
       g.querySelectorAll("select").forEach(function (s) {
         s.addEventListener("change", function () { updateConditionals(g); });
       });

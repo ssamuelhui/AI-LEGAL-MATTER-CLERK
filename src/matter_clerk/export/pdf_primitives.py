@@ -172,6 +172,43 @@ def cover_note_box(width: float) -> KeepTogether:
     return KeepTogether(t)
 
 
+def authority_disclaimer_box(payload, width: float) -> Table:
+    """The Phase-2b authority disclaimer for the PDF, styled like the DRAFT
+    cover note so it reads as an instrument rather than a footnote.
+
+    Amber rather than the cover note's red: this is a caveat about what
+    verification means, not a prohibition on using the document."""
+    from .. import verification
+
+    rows = [
+        Paragraph("<b>CITATION VERIFICATION</b>", SMALL_STYLE),
+        Paragraph(f"<b>{verification.AUTHORITY_DISCLAIMER}</b>", SMALL_STYLE),
+    ]
+    if payload.verification_summary:
+        text = payload.verification_summary
+        if payload.verification_incomplete:
+            text += (
+                " &mdash; verification did not complete; citations marked "
+                "[UNVERIFIED] were not checked."
+            )
+        rows.append(Paragraph(f"This draft: {text}.", SMALL_STYLE))
+
+    t = Table([[r] for r in rows], colWidths=[width])
+    t.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FFF4E5")),
+                ("BOX", (0, 0), (-1, -1), 1.5, colors.HexColor("#D97706")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ]
+        )
+    )
+    return t
+
+
 def warning_box(text: str, width: float) -> Table:
     t = Table([[Paragraph(inline_rl(text), SMALL_STYLE)]], colWidths=[width])
     t.setStyle(

@@ -31,6 +31,20 @@ inputs:
       values:
         - "Statement of Defence (Superior Court of Justice)"
         - "Defence — Form 9A (Small Claims Court)"
+  # Phase 2b — see the note in draft_memo.yaml. Authority mode does NOT touch
+  # any of the pleading safety machinery: the DRAFT banner, the cover note, the
+  # limitation gate and the [ELEMENTS REQUIRED] / [ADDITIONAL MATERIAL REQUIRED]
+  # markers all still apply, because all of them are code-owned and independent
+  # of where legal authority comes from.
+  - name: authority_mode
+    type: radio
+    required: false
+    control: true
+    label: Authority
+    options:
+      - Matter-only
+      - Matter + CanLII case authority
+
   - name: limitation_confirmed
     type: checkbox
     required: false

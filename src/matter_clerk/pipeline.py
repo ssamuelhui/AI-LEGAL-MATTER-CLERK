@@ -10,8 +10,9 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from . import audit, pleadings, structured
+from . import audit, citations as case_citations, pleadings, structured, verification
 from .citation import Citation
+from .verification import VerificationReport
 from .structured import ComparisonTable, EntityCategory, TimelineRow
 from .embed import embed, embedding_dimension
 from .ingest import (
@@ -25,6 +26,7 @@ from .llm import LLMClient
 from .matters import MatterFile
 from .prompts import (
     TaskTemplate,
+    authority_mode_enabled,
     build_comparison_user_message,
     build_retrieval_query,
     build_system_prompt,
@@ -171,6 +173,14 @@ class PipelineResult(BaseModel):
     # Divergence between the structured data and the markdown table, surfaced to
     # the user rather than silently resolved in favour of either.
     export_warnings: list[str] = []
+    # Phase 2b: citation verification. `authority_mode` is False for every task
+    # and every run except a Draft Memo / Draft Pleading the lawyer explicitly
+    # switched into authority mode, and `verification` is None whenever it is
+    # False — so nothing downstream changes for any other run.
+    authority_mode: bool = False
+    verification: Optional[VerificationReport] = None
+
+    model_config = {"arbitrary_types_allowed": True}
 
 
 class IngestOutcome(BaseModel):
@@ -398,6 +408,7 @@ def run_query(
         pdf_sha256=pdf_sha256,
         collection=coll,
         was_reindexed=outcome.was_reindexed,
+        matter_id=matter_id,
     )
 
 
@@ -427,6 +438,7 @@ def _answer_and_build(
     pdf_sha256: str = "",
     collection: str = "",
     was_reindexed: bool = False,
+    matter_id: int | None = None,
 ) -> PipelineResult:
     """Shared answer/citation/result tail for run_query and run_matter_query.
 
@@ -461,6 +473,17 @@ def _answer_and_build(
     # exactly as it did) and validate it into the structured intermediates.
     # Non-tabular tasks pass through untouched.
     answer, extracted = structured.extract(task, answer.strip())
+
+    # Phase 2b: citation verification. Runs AFTER generation and mutates only
+    # `answer`, so it is invisible to every run that did not opt in — and so the
+    # code-owned pleading machinery (DRAFT banner, cover note), which wraps the
+    # answer at RENDER time, is unaffected by construction.
+    authority = authority_mode_enabled(task, structured_inputs)
+    report: VerificationReport | None = None
+    if authority:
+        answer, report = _verify_answer_citations(
+            answer, task=task, matter_id=matter_id
+        )
 
     citations: list[Citation] = []
     seen: set[tuple[str, str]] = set()
@@ -504,7 +527,46 @@ def _answer_and_build(
         cross_document=cross_document,
         retrieved_sources=retrieved_sources or [],
         retrieved_file_ids=retrieved_file_ids or [],
+        authority_mode=authority,
+        verification=report,
     )
+
+
+def _verify_answer_citations(
+    answer: str, *, task: str, matter_id: int | None
+) -> tuple[str, VerificationReport]:
+    """Extract, verify, and rewrite the case citations in a generated answer.
+
+    Never raises. A verification layer that can fail the whole run would mean a
+    CanLII outage destroys a memo the model has already produced and the lawyer
+    has already paid for — so every failure path lands in the report as
+    UNVERIFIABLE and the draft is returned with honest markers instead."""
+    try:
+        found = case_citations.extract_citations(answer)
+        report = verification.verify_citations(found)
+        answer = verification.apply_to_answer(answer, report)
+    except Exception as e:  # never lose a generated draft to a checking bug
+        log.exception("Citation verification failed; returning the draft unmarked")
+        report = VerificationReport(incomplete=True)
+        report.results = []
+        answer = (
+            f"{answer}\n\n[UNVERIFIED — citation verification could not be "
+            f"completed for this draft ({e}). No citation below has been "
+            f"checked against CanLII.]"
+        )
+        return answer, report
+
+    log.info(
+        f"Citation verification: {report.summary_line()} "
+        f"({report.calls_made} CanLII call(s))"
+    )
+    audit.log_event(
+        "citation_verification",
+        matter_id=matter_id,
+        task=task,
+        **verification.build_audit_payload(report),
+    )
+    return answer, report
 
 
 def _scan_matter_for_limitation(
@@ -654,6 +716,7 @@ def run_matter_query(
         cross_document=True,
         retrieved_sources=retrieved_sources,
         retrieved_file_ids=retrieved_file_ids,
+        matter_id=matter_id,
     )
 
 
@@ -789,4 +852,5 @@ def run_compare_clauses(
         user_message=build_comparison_user_message(
             template, structured_inputs, groups
         ),
+        matter_id=matter_id,
     )

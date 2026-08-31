@@ -70,6 +70,32 @@
                 background: #fafafa; padding: 10px 12px; border-radius: 4px; }
     .question { background: #f6f6f6; padding: 10px 14px; border-radius: 4px;
                 font-style: italic; color: #444; }
+    /* Phase 2b — citation verification */
+    .banner.authority-disclaimer {
+      background: #fff4e5; border: 2px solid #d97706; color: #6b3a00;
+      font-size: 15px; line-height: 1.55; padding: 14px 16px;
+    }
+    .radio-set { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+    label.radio-opt { font-size: 14px; }
+    .authority-hint { margin-top: 8px; font-size: 13px; }
+    .verify-summary { font-size: 14px; font-weight: 600; color: #333;
+                      background: #fafafa; padding: 9px 12px; border-radius: 4px; }
+    .verify-table { border-collapse: collapse; width: 100%; margin-top: 10px;
+                    font-size: 13px; }
+    .verify-table th, .verify-table td { border: 1px solid #ddd; padding: 6px 9px;
+                                         text-align: left; vertical-align: top; }
+    .verify-table th { background: #f6f6f6; font-size: 12px; }
+    .verify-table tr.v-not_found td { background: #fdf0f0; }
+    .verify-table tr.v-name_mismatch td { background: #fff8e1; }
+    .verify-table tr.v-context td { background: #fafafa; font-style: italic;
+                                    border-top: 0; }
+    .verify-table a { color: #1f6feb; text-decoration: none; }
+    .tick { color: #1d7a1d; font-weight: 700; }
+    /* Inline badges written into the answer by the verification pass. */
+    .cite-ok  { color: #1d7a1d; font-size: 12px; font-weight: 600;
+                white-space: nowrap; }
+    .cite-bad { background: #fdf0f0; color: #8a1f1f; font-weight: 600;
+                padding: 1px 4px; border-radius: 3px; }
   </style>
 </head>
 <body>

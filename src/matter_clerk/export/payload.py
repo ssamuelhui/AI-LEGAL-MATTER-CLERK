@@ -63,6 +63,14 @@ class ExportPayload(BaseModel):
     party_role: str | None = None
     pleading_warnings: list[str] = Field(default_factory=list)
 
+    # Phase 2b: citation verification. `authority_mode` drives the exported
+    # disclaimer and marker highlighting; `verification_summary` is the same
+    # one-line status the lawyer saw on screen, so the file and the page cannot
+    # disagree about what was checked.
+    authority_mode: bool = False
+    verification_summary: str = ""
+    verification_incomplete: bool = False
+
     request_summary: dict[str, str] = Field(default_factory=dict)
     model: str = ""
     embed_model: str = ""
@@ -73,6 +81,18 @@ class ExportPayload(BaseModel):
     @property
     def excel_available(self) -> bool:
         return self.task in EXCEL_TASKS
+
+    @property
+    def highlight_markers(self) -> bool:
+        """Whether the body renderers should call out bracketed markers.
+
+        Pleadings always do (the [ELEMENTS REQUIRED] gap markers). Authority
+        mode adds a second, stronger reason that applies to memos too: a
+        [REMOVED — citation not verified: ...] marker records that the tool
+        DELETED a case the draft relied on. In an exported file that may be
+        forwarded onward, that is the single most important thing on the page
+        for a reviewer not to skim past."""
+        return self.is_pleading or self.authority_mode
 
     def generated_on(self) -> str:
         """Date for the attribution footer, taken from the RUN timestamp rather
@@ -142,6 +162,7 @@ def build_payload(
     the attribution footer would be blank on exactly the ad-hoc single-file path
     where it is simplest to state.
     """
+    report = getattr(result, "verification", None)
     sources = list(result.retrieved_sources)
     if not sources:
         seen: list[str] = []
@@ -165,6 +186,9 @@ def build_payload(
         is_pleading=task == "draft_pleading",
         party_role=party_role,
         pleading_warnings=list(result.pleading_warnings),
+        authority_mode=bool(getattr(result, "authority_mode", False)),
+        verification_summary=report.summary_line() if report else "",
+        verification_incomplete=bool(report.incomplete) if report else False,
         request_summary={str(k): str(v) for k, v in request_summary.items()},
         model=result.model,
         embed_model=result.embed_model,

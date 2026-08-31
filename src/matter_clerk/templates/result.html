@@ -2,10 +2,78 @@
 {% block content %}
 <nav><a href="{{ back_url or '/' }}">&larr; {{ back_label or 'Run another task' }}</a></nav>
 
+{# Phase 2b: the authority disclaimer sits ABOVE the DRAFT banner. It is the    #}
+{# first thing on the page because the risk it names — a real citation read as #}
+{# a verified PROPOSITION — is the one a reader is most likely to act on       #}
+{# without checking. Two sentences by design: what verification confirms, and  #}
+{# what it does not.                                                           #}
+{% if authority_mode %}
+<div class="banner authority-disclaimer">
+  <strong>Citations verified against CanLII confirm the cases exist. They do
+  NOT confirm the cases actually held what is stated.</strong>
+  You must read each cited case yourself before relying on any claim made
+  about it.
+</div>
+{% endif %}
+
 {% if is_pleading %}<div class="banner draft">{{ draft_banner }}</div>{% endif %}
 
+{% if authority_mode and verification %}
 <section class="block">
-  <h2>{{ task_label }} &middot; matter-only</h2>
+  <h2>Citation verification</h2>
+  <div class="verify-summary">{{ verification.summary_line() }}</div>
+  {% if verification.incomplete %}
+  <div class="banner error">
+    <strong>Verification did not complete.</strong> CanLII could not be reached
+    for at least one citation, so parts of this draft are unchecked. Every
+    citation marked <code>[UNVERIFIED&nbsp;&mdash;&nbsp;&hellip;]</code> below
+    must be confirmed by hand.
+  </div>
+  {% endif %}
+  {% if verification.results %}
+  <details {% if verification.stripped or verification.mismatched %}open{% endif %}>
+    <summary>Every citation found in this draft, and what checking established</summary>
+    <table class="verify-table">
+      <thead><tr><th>Citation</th><th>Result</th><th>CanLII record</th></tr></thead>
+      <tbody>
+        {% for r in verification.distinct_results() %}
+        <tr class="v-{{ r.outcome.value }}">
+          <td><code>{{ r.citation.full_citation }}</code>
+            {% if r.citation.case_name %}<div class="hint">{{ r.citation.case_name }}</div>{% endif %}
+          </td>
+          <td>
+            {% if r.outcome.value == 'verified' %}<span class="tick">&#10003;</span> exists in CanLII
+            {% elif r.outcome.value == 'name_mismatch' %}Exists, but names a different case
+            {% elif r.outcome.value == 'not_found' %}<strong>Not in CanLII &mdash; removed</strong>
+            {% elif r.outcome.value == 'unsupported' %}Format cannot be checked
+            {% else %}Could not be checked{% endif %}
+          </td>
+          <td>
+            {% if r.canlii_case %}
+              <a href="{{ r.canlii_case.url }}" target="_blank" rel="noopener">{{ r.canlii_case.title }}</a>
+              <div class="hint">{{ r.canlii_case.court.name }}{% if r.canlii_case.decision_date %} &middot; {{ r.canlii_case.display_date }}{% endif %}</div>
+            {% elif r.outcome.value == 'not_found' %}
+              <span class="hint">no such case</span>
+            {% else %}
+              <span class="hint">&mdash;</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% if r.outcome.value in ('not_found', 'name_mismatch') %}
+        <tr class="v-context"><td colspan="3">
+          <span class="hint">In this sentence:</span> &ldquo;{{ r.citation.context_sentence }}&rdquo;
+        </td></tr>
+        {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="block">
+  <h2>{{ task_label }} &middot; {% if authority_mode %}matter + CanLII case authority{% else %}matter-only{% endif %}</h2>
   {% if party_role %}<div class="question"><strong>Party role:</strong> {{ party_role }}</div>{% endif %}
   {% if request_summary %}
   <div class="question">

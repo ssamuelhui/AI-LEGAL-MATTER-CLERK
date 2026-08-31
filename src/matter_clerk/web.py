@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -21,7 +22,9 @@ from flask import (
 )
 from werkzeug.serving import make_server
 
-from . import audit, canlii, discovery, export, matters, pipeline, pleadings
+from . import (
+    audit, canlii, citations, discovery, export, matters, pipeline, pleadings,
+)
 from .prompts import (
     DEFAULT_TASK,
     available_tasks,
@@ -48,6 +51,39 @@ def render_markdown(text: str) -> str:
     raw_html = _MD.reset().convert(text)
     return bleach.clean(
         raw_html, tags=ALLOWED_TAGS, attributes=ALLOWED_ATTRS, strip=True
+    )
+
+
+# Phase 2b: style the verification markers the pipeline wrote into the answer.
+#
+# Applied AFTER bleach, deliberately. The alternative — adding <span class> to
+# the sanitiser allowlist — would widen what MODEL output is permitted to emit,
+# to solve a problem that is entirely about text WE inserted. Running afterwards
+# keeps the allowlist exactly as strict as it was: the citation text inside each
+# marker has already been escaped by bleach, and only our own literal marker
+# shapes are matched.
+_MARK_VERIFIED_HTML = re.compile(re.escape(citations.MARK_VERIFIED))
+# One level of bracket nesting tolerated — a reporter-only citation is itself
+# bracketed, so "[UNVERIFIED — ...: [2005] 2 S.C.R. 601]" must not be clipped at
+# the inner "]". Same reason as citations.VERIFICATION_MARKER_PATTERN.
+_MARK_FLAGGED_HTML = re.compile(
+    r"\[(?:REMOVED|CITATION MISMATCH|UNVERIFIED)"
+    r"(?:[^\[\]]|\[[^\[\]]*\])*\]",
+    re.DOTALL,
+)
+
+
+def decorate_verification_markers(html: str) -> str:
+    """Turn the plain-text verification markers into styled inline badges.
+
+    The canonical markers in `answer` stay ASCII/WinAnsi-safe so the Word and
+    PDF exports can render them; the check mark exists only here, in the one
+    renderer where a U+2713 is guaranteed to have a glyph."""
+    html = _MARK_VERIFIED_HTML.sub(
+        '<span class="cite-ok">&#10003; verified in CanLII</span>', html
+    )
+    return _MARK_FLAGGED_HTML.sub(
+        lambda m: f'<span class="cite-bad">{m.group(0)}</span>', html
     )
 
 
@@ -153,7 +189,11 @@ def _render_result(
         pleading_warnings=result.pleading_warnings,
         email_metadata=result.email_metadata,
         attachment_warnings=result.attachment_warnings,
-        answer_html=render_markdown(result.answer),
+        answer_html=decorate_verification_markers(
+            render_markdown(result.answer)
+        ),
+        authority_mode=result.authority_mode,
+        verification=result.verification,
         citations=result.citations,
         cross_document=result.cross_document,
         retrieved_sources=result.retrieved_sources,

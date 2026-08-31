@@ -715,6 +715,52 @@ class CanLIIClient:
         return out
 
     # -- enrichment --------------------------------------------------------
+    def case_metadata_by_id(self, database_id: str, case_id: str) -> CanLIICase:
+        """Look a case up directly by its CanLII caseId.
+
+        This is Phase 2b's citation-existence check. A neutral citation maps
+        deterministically onto a caseId ("2020 ONCA 471" -> "2020onca471"), so
+        existence is a single 200-or-404, with no search and no ranking in the
+        loop. Raises CanLIINotFound on 404 — that IS the negative answer, and
+        the caller relies on it being distinguishable from a network failure.
+
+        Two behaviours verified against the live API on 2026-08-27:
+          * The caseId MUST be lowercase. "2020ONCA471" returns 404 with
+            "Data id 2020ONCA471 is invalid".
+          * The databaseId path segment is IGNORED — caseBrowse/en/zzzz/
+            2020onca471/ returns the ONCA case. So a wrong court mapping cannot
+            cause a real citation to be reported as fabricated. The caller must
+            still compare the RETURNED citation against the one it asked for,
+            which is why this returns the full record rather than a bool.
+        """
+        data = self._get(
+            f"caseBrowse/{self.language}/{database_id or 'x'}/{case_id.lower()}/"
+        )
+        if not isinstance(data, dict) or not data.get("citation"):
+            raise CanLIIUnavailable(
+                "CanLII returned an unexpected payload for a case lookup."
+            )
+        db = (data.get("databaseId") or database_id or "").strip().lower()
+        case = CanLIICase(
+            database_id=db,
+            case_id=_unwrap_localised(data.get("caseId")) or case_id,
+            title=(data.get("title") or "").strip(),
+            citation=(data.get("citation") or "").strip(),
+            long_url=(data.get("longUrl") or "").strip(),
+            court=court_for(db, self.databases()),
+        )
+        case.short_url = (data.get("url") or "").strip() or None
+        case.docket_number = (data.get("docketNumber") or "").strip() or None
+        case.keywords = (data.get("keywords") or "").strip() or None
+        case.topics = (data.get("topics") or "").strip() or None
+        case.decision_date = _parse_date(data.get("decisionDate"))
+        case.year = (
+            case.decision_date.year
+            if case.decision_date
+            else parse_citation_year(case.citation)
+        )
+        return case
+
     def case_metadata(self, case: CanLIICase) -> CanLIICase:
         """Fill decision date, catchwords, topics, docket and short URL.
 

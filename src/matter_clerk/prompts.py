@@ -95,6 +95,288 @@ DETAILED_TIMELINE_INSTRUCTION = (
 )
 
 # --------------------------------------------------------------------------
+# Authority mode (Phase 2b) -- Draft Memo and Draft Pleading only.
+#
+# Matter-only mode forbids the model from invoking any external legal authority,
+# which is safe but leaves a memo full of gap markers. Authority mode lifts that
+# prohibition for these two tasks and instead catches fabrication AFTER
+# generation: every citation the model produces is checked against CanLII, and
+# one that does not resolve is stripped from the document.
+#
+# Two things about this text are load-bearing.
+#
+# First, it REPLACES the matter-only prohibition rather than being appended
+# alongside it. An appended permission would leave the prompt holding two
+# contradictory instructions ("you must not cite any case" and "you may cite
+# cases"), and a model free to follow either is a model whose citation
+# behaviour is unpredictable — the opposite of what this feature is for.
+#
+# Second, rule 4's escape hatch does real work. Fabrication happens when a model
+# has no permitted way to say "authority is needed here and I do not have it".
+# Giving it an explicit, blessed way to say exactly that reduces invention far
+# more than any amount of prohibition does.
+#
+# Third -- and this is what the first cut of this text got wrong -- the rules
+# have to be CALIBRATED, not merely strict. The original rule 3 demanded
+# certainty ("if you are not certain a case is real, DO NOT CITE IT"), and since
+# no rule anywhere requires the model to cite anything, "cite nothing" satisfied
+# every rule in the block perfectly. Both MiMo and Claude found that equilibrium
+# and sat in it: zero citations on every authority-mode run, which made the mode
+# functionally identical to matter-only. The fix is to state the positive
+# expectation explicitly and to move the threshold to reasonable confidence,
+# because the CanLII check downstream is what catches an existence error -- the
+# model is not the last line of defence and should not behave as though it is.
+# Rules 1 and 6 are NOT softened: verification checks that a case exists, and
+# nothing anywhere checks that it held what the sentence claims it held.
+# --------------------------------------------------------------------------
+AUTHORITY_MODE_INSTRUCTION = """\
+AUTHORITY MODE — you may cite real Canadian legal authority.
+
+Support the legal analysis with real Canadian cases where they bear on the
+issue. A document produced in this mode is EXPECTED to carry authority: citing
+nothing at all is not the cautious answer, it is an incomplete one. Work within
+the rules below.
+
+1. Never invent a citation. Do not fabricate a case name, approximate a year or
+   a number, reconstruct a half-remembered citation, or assemble a
+   plausible-looking one out of fragments. A citation you made up is the single
+   worst thing this system can produce.
+
+2. Give every case its NEUTRAL CITATION in standard form — year, court,
+   number: "2020 ONCA 471", "2021 SCC 7", "2019 ONSC 4484". A citation given in
+   any other form cannot be checked and will be marked unverified in your
+   output.
+
+3. Cite when you have reasonable confidence a case exists. You do not need
+   certainty. Verification will catch factually incorrect citations, so the
+   threshold is reasonable confidence, not proof. Only decline to cite when you
+   have no reasonable basis — in which case, either use the rule 4 marker or
+   state the legal principle without attribution.
+
+4. Where a proposition needs authority and you have no reasonable basis for a
+   citation, write exactly, inline:
+   "[AUTHORITY REQUIRED — lawyer to confirm: <state the proposition that needs
+   authority>]"
+   This marker is always available and using it is never a failure. It is the
+   right move when you genuinely have nothing — not a substitute for a citation
+   you could reasonably give under rule 3.
+
+5. Prefer Supreme Court of Canada and Ontario authority. Label any
+   out-of-province decision as persuasive only.
+
+6. Never state that a case HELD something you are not certain it held. Rule 3
+   does NOT relax this one. Reasonable confidence that a case exists is enough
+   to cite it; describing its holding, facts, reasoning, or disposition requires
+   real confidence in that description, and nothing downstream checks it. Cite a
+   case for the proposition it supports and keep the characterisation minimal.
+
+7. Every citation you give WILL be checked against CanLII after you finish. One
+   that does not resolve is removed from your output and recorded in an audit
+   log, and the lawyer is shown exactly what was removed. That safety net is
+   precisely why rule 3 asks for reasonable confidence instead of certainty: an
+   existence error is caught downstream, so you do not have to suppress a
+   citation to be safe. It is not licence to guess — a citation you have no
+   basis for belongs under rule 4 instead.
+
+Authority mode changes NOTHING about facts. Every factual claim still carries
+its inline [FILENAME p.N] citation to the matter documents exactly as required
+above. This mode relaxes the prohibition on legal authority only."""
+
+
+# The clauses of SAFETY_PREAMBLE that forbid external authority. In authority
+# mode these two are replaced (not deleted -- the replacement re-imposes the
+# fabrication rules in the form appropriate to the mode).
+#
+# Held as exact anchors and checked at template-load time so that an edit to
+# SAFETY_PREAMBLE which orphans them fails loudly at startup rather than
+# silently leaving matter-only prohibitions in an authority-mode prompt.
+_PREAMBLE_AUTHORITY_ANCHOR = """\
+2. You may cite only passages that appear in the CONTEXT section of this \
+prompt. You must not cite any case, statute, regulation, rule, or other legal \
+authority from memory or general knowledge -- even if you are confident the \
+authority exists and even if the request seems to call for it.
+
+3. You must not state the elements of a cause of action, the test for a \
+remedy, the requirements of a statute, or the contents of a procedural rule \
+from memory. These are legal authority and are not available in matter-only \
+mode."""
+
+_PREAMBLE_AUTHORITY_REPLACEMENT = """\
+2. For FACTS, you may rely only on passages that appear in the CONTEXT section \
+of this prompt. Every factual claim carries its [SOURCE: ...] citation as \
+described in rule 1.
+
+3. For LEGAL AUTHORITY, you are in AUTHORITY MODE (see the authority-mode \
+instructions below). You may cite real Canadian cases subject to those rules. \
+You must still not invent a citation, and you must not state that a case held \
+something you are not certain it held."""
+
+_PREAMBLE_MATTER_ONLY_LINE = (
+    "You are operating in MATTER-ONLY MODE: no external legal authority has "
+    "been retrieved for this run."
+)
+_PREAMBLE_AUTHORITY_LINE = (
+    "You are operating in AUTHORITY MODE: you may cite real Canadian case law, "
+    "and every citation you give will be verified against CanLII after you "
+    "finish."
+)
+
+# Per-task matter-only text in the YAML bodies, removed in authority mode.
+# Keyed by task id; each value is (exact text to replace, replacement).
+#
+# Kept in CODE rather than expressed as an alternative body in the YAML for the
+# same reason SAFETY_PREAMBLE is code-owned: which prohibitions apply in which
+# mode is a correctness rule, not drafting guidance a template author should be
+# able to relax. Every anchor is asserted at load time by `check_authority_anchors`.
+_TASK_AUTHORITY_SWAPS: dict[str, list[tuple[str, str]]] = {
+    "draft_memo": [
+        (
+            "- Analysis: reason from the matter facts. You are in MATTER-ONLY "
+            "MODE: no\n  external legal authority (cases, statutes, "
+            "regulations, rules) has been\n  retrieved for this run.",
+            "- Analysis: reason from the matter facts, and support the legal "
+            "propositions\n  with real Canadian authority under the "
+            "authority-mode rules below.",
+        ),
+        (
+            'MATTER-ONLY MODE — mandatory and non-negotiable:\nYou have been '
+            "provided NO external legal authority. You must not cite, name,\n"
+            "paraphrase, or assert any case, statute, regulation, rule, legal "
+            "test, or the\nelements of any cause of action from memory or "
+            "general knowledge — not even if\nyou are confident it exists and "
+            'not even framed as "generally" or "typically."\n\nWherever the '
+            "analysis would require external legal authority to be complete,\n"
+            "do not fill the gap. Instead insert, inline at that point, the "
+            'exact sentence:\n\n"External legal authority is required to '
+            "complete this point and is not\navailable in matter-only mode — "
+            "[state specifically what authority is needed,\ne.g. 'the test for "
+            "relief from forfeiture'].\"\n\nA memo that openly flags these gaps "
+            "is correct. A memo that quietly supplies\nlegal authority from "
+            "training knowledge is a critical failure.",
+            "A memo that openly flags the points where authority is needed but "
+            "unavailable\nis correct. A memo that quietly supplies a plausible "
+            "but unverified case is a\ncritical failure.",
+        ),
+    ],
+    "draft_pleading": [
+        (
+            "- You may NAME a cause of action or a defence, but you must NOT "
+            "state its\n  legal elements, the governing statutory test, or the "
+            "supporting authority\n  from memory. Where the elements or legal "
+            "test are needed to complete a\n  paragraph, do NOT supply them — "
+            'insert exactly, inline:\n  "[ELEMENTS REQUIRED — lawyer to '
+            "complete: <name the cause of action / defence\n  and what must be "
+            "established>; external legal authority is required and is\n  not "
+            'available in matter-only mode.]"',
+            "- You may name a cause of action or a defence and state its legal "
+            "elements\n  where you can support them with real Canadian "
+            "authority under the\n  authority-mode rules below. Where you "
+            "cannot, do NOT supply the elements\n  from memory — insert "
+            'exactly, inline:\n  "[ELEMENTS REQUIRED — lawyer to complete: '
+            "<name the cause of action / defence\n  and what must be "
+            'established>; authority for these elements was not\n  available.]"',
+        ),
+    ],
+}
+
+
+def check_authority_anchors(templates: dict) -> None:
+    """Fail at startup if any authority-mode anchor no longer matches its
+    template, if the SAFETY_PREAMBLE clauses have drifted, or if a template's
+    `authority_mode` options have drifted from AUTHORITY_MODE_OPTIONS.
+
+    Without this, a reworded template silently leaves matter-only prohibitions
+    in an authority-mode prompt: the model would be told both that it may cite
+    cases and that it must not, and the result would be neither mode.
+
+    The options check guards a second, quieter failure of the same class. The
+    radio's option string IS the value the form submits, and
+    `authority_mode_enabled` gates on equality with AUTHORITY_MODE_ON — so a
+    template whose options drift by one character does not error anywhere. The
+    radio still renders, the lawyer still selects it, and the run silently
+    falls back to matter-only with no case law and no explanation."""
+    if _PREAMBLE_AUTHORITY_ANCHOR not in SAFETY_PREAMBLE:
+        raise ValueError(
+            "SAFETY_PREAMBLE rules 2-3 have drifted from "
+            "_PREAMBLE_AUTHORITY_ANCHOR; authority mode cannot lift the "
+            "matter-only prohibition. Update the anchor to match."
+        )
+    if _PREAMBLE_MATTER_ONLY_LINE not in SAFETY_PREAMBLE:
+        raise ValueError(
+            "SAFETY_PREAMBLE's matter-only mode sentence has drifted from "
+            "_PREAMBLE_MATTER_ONLY_LINE."
+        )
+    for task_id, swaps in _TASK_AUTHORITY_SWAPS.items():
+        template = templates.get(task_id)
+        if template is None:
+            continue
+        for anchor, _replacement in swaps:
+            if anchor not in template.system_prompt:
+                raise ValueError(
+                    f"{task_id}.yaml no longer contains the matter-only text "
+                    f"that authority mode replaces. The anchor starting "
+                    f"{anchor[:60]!r} was not found; update "
+                    f"_TASK_AUTHORITY_SWAPS to match the template."
+                )
+    for task_id in sorted(AUTHORITY_MODE_TASKS):
+        template = templates.get(task_id)
+        if template is None:
+            continue
+        field = next(
+            (f for f in template.inputs if f.name == "authority_mode"), None
+        )
+        if field is None:
+            raise ValueError(
+                f"{task_id}.yaml is in AUTHORITY_MODE_TASKS but declares no "
+                f"`authority_mode` input, so authority mode cannot be reached "
+                f"from the form. Add the input or remove the task from "
+                f"AUTHORITY_MODE_TASKS."
+            )
+        if tuple(field.options or ()) != AUTHORITY_MODE_OPTIONS:
+            raise ValueError(
+                f"{task_id}.yaml `authority_mode` options "
+                f"{tuple(field.options or ())} do not match "
+                f"prompts.AUTHORITY_MODE_OPTIONS {AUTHORITY_MODE_OPTIONS}. The "
+                f"option string is the value the form submits and is compared "
+                f"against AUTHORITY_MODE_ON, so any difference silently "
+                f"disables authority mode for this task."
+            )
+
+
+AUTHORITY_MODE_OPTIONS = ("Matter-only", "Matter + CanLII case authority")
+AUTHORITY_MODE_ON = AUTHORITY_MODE_OPTIONS[1]
+
+# Tasks permitted to run in authority mode (SoW Phase 2b scope). Code-owned:
+# every other task's matter-only or case-discovery discipline is unchanged, and
+# a template author must not be able to opt a ninth task in by editing YAML.
+AUTHORITY_MODE_TASKS = frozenset({"draft_memo", "draft_pleading"})
+
+
+def authority_mode_enabled(task: str, structured_inputs: dict | None) -> bool:
+    """Whether this run is in authority mode. False for any task outside
+    AUTHORITY_MODE_TASKS regardless of what the form submitted."""
+    if task not in AUTHORITY_MODE_TASKS:
+        return False
+    si = structured_inputs or {}
+    return si.get("authority_mode") == AUTHORITY_MODE_ON
+
+
+def _authorize_preamble(preamble: str) -> str:
+    """Lift the matter-only prohibition from SAFETY_PREAMBLE."""
+    out = preamble.replace(_PREAMBLE_MATTER_ONLY_LINE, _PREAMBLE_AUTHORITY_LINE)
+    return out.replace(
+        _PREAMBLE_AUTHORITY_ANCHOR, _PREAMBLE_AUTHORITY_REPLACEMENT
+    )
+
+
+def _authorize_body(task: str, body: str) -> str:
+    """Apply the per-task matter-only -> authority-mode text swaps."""
+    for anchor, replacement in _TASK_AUTHORITY_SWAPS.get(task, []):
+        body = body.replace(anchor, replacement)
+    return body
+
+
+# --------------------------------------------------------------------------
 # Case discovery (Phase 2a) -- the first task that is NOT matter-only.
 #
 # SAFETY_PREAMBLE cannot be reused here. Its opening sentence states that no
@@ -259,7 +541,7 @@ class InputField(BaseModel):
     # exactly as it does `file_id`.
     type: Literal[
         "text", "textarea", "multiselect", "select", "checkbox",
-        "file_multiselect", "number",
+        "file_multiselect", "number", "radio",
     ]
     label: str
     required: bool = False
@@ -418,6 +700,10 @@ def load_templates() -> dict[str, TaskTemplate]:
         from . import pleadings
 
         pleadings.check_template(out["draft_pleading"])
+    # Phase 2b: fail loudly if a template edit orphaned an authority-mode
+    # anchor, which would leave matter-only prohibitions inside an
+    # authority-mode prompt.
+    check_authority_anchors(out)
     return out
 
 
@@ -467,15 +753,32 @@ def build_system_prompt(
     pleading variant). When cross_document is True (a matter scatter-gather
     query), the preamble clause is swapped, a MATTER CONTEXT note is inserted,
     and the matter phrase map is applied to the body/variant. When False the
-    output is character-identical to the single-document behaviour."""
+    output is character-identical to the single-document behaviour.
+
+    Phase 2b: when `structured_inputs` selects authority mode on a task that
+    permits it, the matter-only prohibition is REPLACED (never merely
+    supplemented) and AUTHORITY_MODE_INSTRUCTION is appended. With authority
+    mode off — the default — every byte of this function's output is unchanged
+    from Phase 1."""
+    authority = authority_mode_enabled(template.id, structured_inputs)
+
+    preamble = SAFETY_PREAMBLE
     if cross_document:
-        parts = [
-            _matterize_preamble(SAFETY_PREAMBLE),
-            MATTER_CONTEXT_NOTE,
-            _matterize(template.system_prompt.strip()),
-        ]
-    else:
-        parts = [SAFETY_PREAMBLE, template.system_prompt.strip()]
+        preamble = _matterize_preamble(preamble)
+    if authority:
+        preamble = _authorize_preamble(preamble)
+
+    body = template.system_prompt.strip()
+    if cross_document:
+        body = _matterize(body)
+    if authority:
+        body = _authorize_body(template.id, body)
+
+    parts = [preamble]
+    if cross_document:
+        parts.append(MATTER_CONTEXT_NOTE)
+    parts.append(body)
+
     if template.variants:
         si = structured_inputs or {}
         key = si.get("pleading_type")
@@ -486,7 +789,16 @@ def build_system_prompt(
                 f"(one of {list(template.variants)}); got {key!r}"
             )
         v = variant.strip()
-        parts.append(_matterize(v) if cross_document else v)
+        if cross_document:
+            v = _matterize(v)
+        if authority:
+            v = _authorize_body(template.id, v)
+        parts.append(v)
+
+    # Appended AFTER the task body and any variant so it is the last word on
+    # citation behaviour the model reads.
+    if authority:
+        parts.append(AUTHORITY_MODE_INSTRUCTION)
     # Day 4c-a: the Timeline "Detailed" control appends the code-owned
     # exhaustiveness instruction after the task body, in BOTH single-file and
     # matter modes. Read from structured_inputs (like `pleading_type` above), so

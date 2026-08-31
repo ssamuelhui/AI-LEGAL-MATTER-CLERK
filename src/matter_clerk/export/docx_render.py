@@ -63,7 +63,10 @@ def _render_blocks(doc, markdown: str, *, highlight_markers: bool = False) -> No
 def render_prose(doc, payload: ExportPayload) -> None:
     """Summarize / Find Facts — free-form prose with occasional lists."""
     prim.add_heading(doc, "Answer", level=2)
-    _render_blocks(doc, payload.answer_markdown)
+    _render_blocks(
+        doc, payload.answer_markdown,
+        highlight_markers=payload.highlight_markers,
+    )
 
 
 def render_sectioned(doc, payload: ExportPayload) -> None:
@@ -72,13 +75,23 @@ def render_sectioned(doc, payload: ExportPayload) -> None:
     to give the body its own titled section and to keep memo-specific layout
     changes away from the plain-prose tasks."""
     prim.add_heading(doc, "Memorandum", level=2)
-    _render_blocks(doc, payload.answer_markdown)
+    # Phase 2b: in authority mode a memo carries [REMOVED — ...] markers
+    # recording citations the tool deleted. Those must be as impossible to skim
+    # past as a pleading's gap markers, so the memo renderer honours the
+    # payload's highlight decision rather than assuming "memos never highlight".
+    _render_blocks(
+        doc, payload.answer_markdown,
+        highlight_markers=payload.highlight_markers,
+    )
 
 
 def render_letter(doc, payload: ExportPayload) -> None:
     """Draft Correspondence — rendered without an 'Answer' heading so the
     letter reads as a letter from the first line."""
-    _render_blocks(doc, payload.answer_markdown)
+    _render_blocks(
+        doc, payload.answer_markdown,
+        highlight_markers=payload.highlight_markers,
+    )
 
 
 def render_timeline(doc, payload: ExportPayload) -> None:
@@ -178,6 +191,11 @@ def build_docx(payload: ExportPayload) -> bytes:
         prim.add_draft_banner(doc)
 
     prim.add_title_block(doc, payload)
+
+    # Phase 2b: the authority disclaimer precedes the cover note and the body,
+    # so a forwarded file carries it before anything a reader might rely on.
+    if payload.authority_mode:
+        prim.add_authority_disclaimer(doc, payload)
 
     if payload.is_pleading:
         prim.add_heading(doc, "Cover note", level=2)

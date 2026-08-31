@@ -16,6 +16,104 @@ The point of this log is to make later "why did we do it this way?" questions an
 
 ## Decisions
 
+## 2026-08-28: Authority-mode radio scoped to "case authority", and its option strings made a checked invariant
+**Context:** The authority-mode radio read "Matter + CanLII authority", which does not tell a lawyer that only *case* citations are verified. The gap it papers over is real and was measured the same day (see the entry below): a memo on a statute-driven issue comes back as `[AUTHORITY REQUIRED]` markers, and nothing in the UI explains why. Relabelling it surfaced a second problem: the radio renders `value="{{ opt }}"` and displays the same string, so **the option text IS the value the form submits**, and `authority_mode_enabled` gates on `== AUTHORITY_MODE_ON`. Editing the label in the template alone would have left the form submitting a string no longer equal to the constant — authority mode would have stopped enabling, silently, with no error anywhere.
+**Decision:**
+- **Label is now "Matter + CanLII case authority"**, with an always-visible helper line under the radio set: *"Verifies case citations against CanLII. Statutory authority still requires manual verification."* It is deliberately **not** folded into the existing `.authority-hint` banner, which JS reveals only once authority mode is selected — this line states what the mode *covers*, so it has to be readable while the lawyer is still choosing. The banner keeps its distinct job (what verification does and does not prove, read before tokens are spent) and still matches on `value.indexOf("CanLII")`. `result.html`'s mode heading was updated in step, so the form and the result page cannot describe the same mode differently.
+- **`check_authority_anchors` now also asserts that every AUTHORITY_MODE_TASKS template declares an `authority_mode` input whose `options` equal `AUTHORITY_MODE_OPTIONS` exactly**, raising at template-load time otherwise. This extends the function's existing remit — it already guards prompt-anchor drift — to the second, quieter member of the same failure class. A missing input raises too: a task in `AUTHORITY_MODE_TASKS` with no radio cannot reach authority mode from the form at all.
+**Alternatives considered:** Splitting the radio's display label from its submitted value so the label could change freely (rejected — it adds a value/label indirection to `InputField` for one field, and the single-string form is what makes the drift *detectable* by an equality check); leaving the YAML/constant agreement to the comment that already asserted it (rejected — a comment is not an invariant, and this change was itself a live instance of the bug it warns about); putting the helper text in the banner (rejected — it would only appear after the choice it is meant to inform).
+**Consequences:** The option string is now genuinely code-owned: it lives in `AUTHORITY_MODE_OPTIONS` and both YAML files, and the three cannot drift apart without a loud failure at startup rather than a quiet fallback to matter-only mid-matter. Verified by mutation — a one-character change, a stale pre-polish label, and a removed input each raise; the clean load does not. Whoever renames this option next must change all three places, which is the intended cost. All four acceptance suites pass unchanged (74 / 38 / all / 148); no prompt text, gating logic, or verification behaviour was touched.
+
+## 2026-08-28: Phase 2b polish — authority-mode prompt recalibrated to reasonable confidence
+**Context:** Authority mode was producing zero case citations from both MiMo Pro and Claude on the Draft Memo task, making it functionally identical to matter-only mode. The suspected cause was `AUTHORITY_MODE_INSTRUCTION` rule 3, which demanded certainty: *"If you are not certain a case is real, DO NOT CITE IT."* Since no rule anywhere in the block **requires** the model to cite anything, "cite nothing" satisfied every rule perfectly — a globally safe strategy that both models found and sat in.
+**Decision:** Rebuilt `AUTHORITY_MODE_INSTRUCTION` around **calibration rather than added strictness**, keeping the rule numbering stable.
+- **Rule 3 now sets the threshold at reasonable confidence, not certainty** — "Cite when you have reasonable confidence a case exists. You do not need certainty. Verification will catch factually incorrect citations." Declining to cite is reserved for having *no reasonable basis*.
+- **An explicit positive expectation was added above rule 1**, because softening rule 3 alone does not remove the "cite nothing" equilibrium — nothing in the old block ever asked for a citation. The block now states that a document produced in this mode is expected to carry authority and that citing nothing "is not the cautious answer, it is an incomplete one."
+- **Rule 7 was re-framed from a warning into the justification for rule 3.** It previously ended "This is not a reason to cite defensively or to hedge — it is a reason to cite only what is real", which reinforced suppression. It now explains that the downstream CanLII check is *why* reasonable confidence suffices — the model is not the last line of defence and should not behave as though it is — while still refusing to license guessing.
+- **Rules 1 and 6 are NOT softened, and rule 6 now says so explicitly.** Verification establishes that a case *exists*; nothing anywhere checks that it *held* what the sentence claims. That asymmetry is the reason rule 3 can be relaxed and rule 6 cannot, so the text states the distinction rather than leaving the model to infer it.
+- **Rule 4's escape hatch is unchanged in substance** but is now positioned against rule 3 — "not a substitute for a citation you could reasonably give" — so it stays available without becoming the default.
+**Alternatives considered:** Leaving rule 3 and adding a citation quota (rejected — a quota manufactures pressure to cite *something*, which is precisely how fabrication starts); deleting rule 3 entirely (rejected — it is the rule that names the no-reasonable-basis case and routes it to rule 4); softening rule 6 alongside rule 3 for consistency (rejected — nothing downstream verifies a holding, so the two rules must be calibrated differently and the text now says why).
+**Consequences — measured, and the headline finding is not the one the change was aimed at.** A four-arm A/B (old vs new instruction × MiMo Pro vs Claude Opus 4.8) on the same Draft Memo query against the Imperial Plaza matter, plus a two-arm control on a deliberately case-law-shaped query:
+
+| Query | Model | Old prompt | New prompt |
+|---|---|---|---|
+| Heat-pump repair obligation | MiMo Pro | 0 citations | **1 verified** (*F.H. v. McDougall*, 2008 SCC 53) |
+| Heat-pump repair obligation | Claude Opus 4.8 | 0 citations | 0 citations |
+| Oppression remedy (control) | Claude Opus 4.8 | 4 verified | 4 verified |
+
+The recalibration is a real but marginal gain on the original query (MiMo 0 → 1). **The zero-citation behaviour was mostly driven by the query, not the prompt.** Authority mode authorizes *case* citations only — rule 2 requires a neutral citation, which no statute has — and the heat-pump memo's authority is almost entirely statutory (*Condominium Act, 1998* ss. 56, 89–91; *Limitations Act, 2002*). Every `[AUTHORITY REQUIRED]` marker in all four runs of that query names a statutory proposition. The models were routing correctly; the mode simply had no channel for the authority the question actually needed. On the control query, where the governing authority *is* case law, Claude cited *BCE Inc. v. 1976 Debentureholders*, 2008 SCC 69 and *3716724 Canada Inc. v. Carleton Condominium Corp. No. 375*, 2016 ONCA 650 — under **both** prompts, all verified. **Statutory authority in authority mode is therefore an open gap, logged to BACKLOG and not addressed here** (out of Phase 2b scope; it needs a retrieval channel, not a prompt change, since the SoW's no-invented-authority rule forbids citing statute text from training knowledge).
+
+Safety discipline held across all six live runs: **zero fabricated citations** (no `not_found`, no `name_mismatch`, no `unsupported`), every citation carried a neutral citation in checkable form, every run still used `[AUTHORITY REQUIRED — lawyer to confirm]` (3–5 markers per memo), and every citation the models did give was correctly named and correctly characterised on inspection. `tests/acceptance/verify_citation_verification.py` passes 74/74; its `"Every citation you give WILL be checked"` anchor was deliberately preserved through the rewrite.
+
+## 2026-08-27: Phase 2b — Authority mode and citation verification
+
+**Context:** Matter-only mode forbids the model from invoking any external legal authority. That is safe, and it produces a memo full of `[ELEMENTS REQUIRED]` gaps. Phase 2b lifts the prohibition for Draft Memo and Draft Pleading — and catches the resulting risk, model-fabricated case citations, *after* generation rather than trying to prevent it by instruction alone. This is the *Mata v. Avianca* failure mode, and it is the one this project's governing rule exists to prevent.
+
+**Decision: extract, then verify, then strip.** After the model produces output, every case citation is extracted, each distinct one is checked against CanLII, and the answer is rewritten with markers. Verification runs *after* generation and mutates only `answer`, which is what makes it invisible to every run that did not opt in, and what makes it structurally incapable of disturbing the code-owned pleading machinery (the DRAFT banner and cover note are applied at *render* time, wrapping whatever `answer` contains).
+
+### The mechanism, and why search is not a fallback
+
+CanLII resolves a case directly from its neutral citation:
+
+```
+GET /caseBrowse/en/{db}/{caseId}/     caseId = "2020onca471"
+  onca/2020onca471    → 200  "2020 ONCA 471 (CanLII)"  Metropolitan Toronto CC 590
+  onca/2027onca999    → 404  ← fabricated
+  onca/2020onca99999  → 404  ← fabricated
+```
+
+Deterministic, one call per distinct citation. Two live-verified quirks shape the code: **`caseId` must be lowercase** (`2020ONCA471` → 404 `"Data id ... is invalid"`), and **the `databaseId` path segment is entirely ignored** (`caseBrowse/en/zzzz/2020onca471/` returns the ONCA case). The second is a robustness gift — a wrong court mapping can never cause a real citation to be reported as fabricated — but it also means the *returned* citation must be compared against the one asked for, which is why the client returns the full record rather than a boolean.
+
+**Search is ruled out as a fallback, not merely unused.** `fullText="2020 ONCA 471"` returns *R. v. Steele*, *Koshman v. Controlex* and other cases that **cite** that decision — `fullText` searches case bodies, so a citation string matches documents mentioning it, never the case itself. A search-based check would be wrong in both directions.
+
+### Five outcomes, and only one of them strips
+
+A boolean would have been wrong. "We checked and it is not there", "we could not check", and "this format cannot be checked" have completely different consequences for a legal document:
+
+| Outcome | Marker | Stripped? |
+|---|---|---|
+| `VERIFIED` | `2020 ONCA 471 [verified in CanLII]` | no |
+| `NAME_MISMATCH` | `[CITATION MISMATCH — 2019 ONSC 4484 is "…", not "…"]` | no |
+| `NOT_FOUND` | `[REMOVED — citation not verified: 2027 ONCA 999]` | **yes** |
+| `UNVERIFIABLE` | `[UNVERIFIED — CanLII could not be reached to check: …]` | no |
+| `UNSUPPORTED` | `[UNVERIFIED — citation format cannot be checked: …]` | no |
+
+Only `NOT_FOUND` strips, because it is the only outcome where we affirmatively established the case does not exist. Stripping on `UNVERIFIABLE` would assert fabrication because a network call failed — a twenty-second CanLII outage would gut a sound memo and accuse the model of inventing every case in it. Stripping on `UNSUPPORTED` would delete valid Supreme Court citations because of a CanLII data-format limitation. Both would put a false statement into a legal document, which is a worse failure than the one the stripping is meant to prevent. Neither earns a tick (fail-closed is preserved); when any `UNVERIFIABLE` is present the page carries a "verification did not complete" banner.
+
+`[2005] 2 S.C.R. 601`-style reporter-only citations have no derivable `caseId` (`2005scr601` → 404 "invalid") and, per the search finding above, no fallback. They are `UNSUPPORTED` — honestly marked as uncheckable rather than blessed or accused.
+
+### Name mismatch — the check existence alone would rubber-stamp
+
+The lookup returns CanLII's `title` for free, so the case *name* is compared too. This catches the failure that pure existence-checking stamps with a tick: the model writes *"Smith v. Jones, 2020 ONCA 471"*, that citation is real, but it is *Metropolitan Toronto Condominium Corporation No. 590*. Confirmed live against `2019 ONSC 4484` attributed to a fabricated "Anderson v. Baker".
+
+Matching is **deliberately loose** — a false mismatch accuses the model of misattributing a real case, which is a serious claim to put before a lawyer. Normalisation, in order: case-fold; drop corporate and procedural suffixes (`inc`, `ltd`, `corp`, `co`, `llp`, `holdings`, `appellant`, …); drop leading `re` / `reference re`; split on the party separator (`v`, `vs`, `versus`, `c`) but **do not compare sides positionally**, because CanLII styles some cases with the parties reversed on appeal; drop tokens under four characters and generic litigation words; keep numbered-company digit strings, which are highly distinctive. A mismatch is declared only when the two names share **no distinctive token at all**. Where either side yields no usable tokens, or the model gave no name, the result is "compatible" — the check exists to catch a confident misattribution, not to manufacture doubt.
+
+### Over-extraction deletes text from a memo
+
+Because strict mode strips, a false extraction is not a wasted API call — it removes text from a legal document. So the court token is validated against a whitelist generated from CanLII's own 409 `databaseId` values plus the neutral-citation aliases that differ (`SCC`→`csc-scc`, `FC`→`fct`, `TCC`→`cci-tcc`, `NWTSC`→`ntsc`) and the historic courts the catalog omits (`ABQB`, `SKQB`, `MBQB`, `NBQB`, `ONHCJ`). Without it, `"the 2020 Revenue 15 report"` extracts, fails lookup, and is deleted. Extraction also swallows any parallel reporter tail into the span, so stripping `2020 ONCA 471, 149 O.R. (3d) 481` does not leave a dangling `, 149 O.R. (3d) 481` pointing at nothing, and it never touches matter-document citations (`[Condo Bylaw 6.pdf p.3]`).
+
+**The bug worth recording:** the first normaliser stripped only a *trailing* parenthetical, so CanLII's `"2021 SCC 7 (CanLII), [2021] 1 SCR 32"` did not compare equal to the model's `"2021 SCC 7"`. A genuine Supreme Court authority was reported as fabricated and stripped from the draft — the exact failure this feature exists to prevent, produced by the feature itself. `normalise_citation` now anchors on the leading *neutral core* and discards whatever CanLII appends. Regression-tested.
+
+### Authority mode replaces the prohibition; it does not sit beside it
+
+`AUTHORITY_MODE_INSTRUCTION` is code-owned, like `SAFETY_PREAMBLE` and `CASE_DISCOVERY_PREAMBLE`. The matter-only prohibition is **removed** from both the preamble and the task body, not supplemented — an appended permission would leave the prompt holding two contradictory instructions ("you must not cite any case" and "you may cite cases"), and a model free to follow either has unpredictable citation behaviour, which is the opposite of the point. The swaps are anchored exact substrings checked at template load by `check_authority_anchors`, so a reworded template fails loudly at startup rather than silently leaving matter-only prohibitions inside an authority-mode prompt.
+
+Rule 4 — `[AUTHORITY REQUIRED — lawyer to confirm: …]` — does most of the real work. Fabrication happens when a model has no permitted way to say "authority is needed here and I do not have it"; a blessed escape hatch reduces invention far more than prohibition does. Rule 7 tells the model its citations will be checked, which is honest and empirically makes models cite more carefully.
+
+Authority mode changes **nothing** about facts: every factual claim still carries its `[FILENAME p.N]` matter citation. It is available only to `draft_memo` and `draft_pleading` (`AUTHORITY_MODE_TASKS`, code-owned so a template author cannot opt a ninth task in), defaults to off, and with it off every byte of `build_system_prompt` output is unchanged from Phase 1.
+
+### Markers are WinAnsi-safe by necessity
+
+The markers travel in `answer`, which is the single source rendered by the web page, the Word export **and** the PDF export. ReportLab's Helvetica is WinAnsi-encoded and has no U+2713, so a check mark baked into the answer would render as a black box in the PDF a lawyer forwards onward. The canonical marker is therefore `[verified in CanLII]`; the web layer decorates it into a green tick *after* bleach, which also avoids widening the sanitiser allowlist to `<span class>` — that would loosen what **model** output may emit in order to style text **we** inserted. One level of bracket nesting is tolerated in the marker patterns, because a reporter-only citation is itself bracketed and a pattern ending at the first `]` clips `[UNVERIFIED — …: [2005] 2 S.C.R. 601]` mid-citation.
+
+**Export integration:** `payload.highlight_markers` is now `is_pleading or authority_mode`, so a memo highlights too. A `[REMOVED]` marker in a forwarded Word or PDF file is *more* important for a reviewer to notice than a pleading gap marker, not less — it records that the tool deleted a case the draft relied on. The disclaimer is written into the exported document's head, identical to the on-screen wording, because a file can be forwarded to someone who never saw the page it came from.
+
+**The disclaimer's two-sentence structure is load-bearing** and is code-owned in `verification.AUTHORITY_DISCLAIMER`: *what verification confirms*, then *what it does not*. A tick a reader takes to mean "this claim is correct" is worse than no tick at all, and only the second sentence prevents that reading. It renders above the DRAFT banner on pleadings, because the risk it names is the one a reader is most likely to act on without checking.
+
+**Alternatives considered:** existence-only verification without the name check (rejected — rubber-stamps a real citation attached to an invented case name, for free); stripping on every non-verified outcome (rejected, above); auto-correcting citations (rejected as fabrication territory, and out of scope); verifying via search (ruled out by the finding above); a per-task rather than per-query toggle (rejected — the lawyer should choose per draft, and the default should be the safe one every time).
+
+**Consequences:** an authority-mode run adds one CanLII call per distinct citation, serial because CanLII permits one concurrent request — "parallelise within the rate limit" is unavailable. At the ~1.1 s effective interval that is 6–11 s for a typical memo and up to ~33 s for a heavy pleading, capped at `MAX_VERIFICATIONS_PER_RUN = 40` (~45 s) beyond which the excess are reported as unchecked rather than silently blessed or dropped. Verification never raises: a bug in the checking layer returns the draft with an honest "could not be completed" marker rather than losing work the lawyer has already paid for. `PipelineResult` gains `authority_mode` and `verification`; both default to off/None, so all seven other tasks are untouched.
+
 ## 2026-08-27: Phase 2a — CanLII case discovery (metadata-only, and deliberately so)
 
 **Context:** CanLII granted API access. The obvious Phase-2 ambition — retrieve case text, inject it into context, cite from it — is not available: the API returns case *metadata* and never the text of a decision, and obtaining that text by other means (scraping) would breach CanLII's terms. The question was what an honest feature looks like under that constraint.

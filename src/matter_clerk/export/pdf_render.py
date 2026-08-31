@@ -76,18 +76,25 @@ def _render_blocks(md: str, width: float, *, highlight: bool = False) -> list:
 # --------------------------------------------------------------------------
 def render_prose(payload: ExportPayload, width: float) -> list:
     return [Paragraph("Answer", prim.H2_STYLE), *_render_blocks(
-        payload.answer_markdown, width
+        payload.answer_markdown, width, highlight=payload.highlight_markers
     )]
 
 
 def render_sectioned(payload: ExportPayload, width: float) -> list:
+    # Phase 2b: in authority mode a memo carries [REMOVED — ...] markers
+    # recording citations the tool deleted. Those must be as impossible to skim
+    # past as a pleading's gap markers, so the memo renderer honours the
+    # payload's highlight decision rather than assuming "memos never highlight".
     return [Paragraph("Memorandum", prim.H2_STYLE), *_render_blocks(
-        payload.answer_markdown, width
+        payload.answer_markdown, width, highlight=payload.highlight_markers
     )]
 
 
 def render_letter(payload: ExportPayload, width: float) -> list:
-    return _render_blocks(payload.answer_markdown, width)
+    return _render_blocks(
+            payload.answer_markdown, width,
+            highlight=payload.highlight_markers,
+        )
 
 
 def render_timeline(payload: ExportPayload, width: float) -> list:
@@ -185,6 +192,11 @@ def build_pdf(payload: ExportPayload) -> bytes:
         story.append(Spacer(1, 14))
 
     story.extend(prim.title_block(payload))
+
+    if payload.authority_mode:
+        story.append(Spacer(1, 8))
+        story.append(prim.authority_disclaimer_box(payload, width))
+        story.append(Spacer(1, 10))
 
     if payload.is_pleading:
         story.append(Spacer(1, 6))

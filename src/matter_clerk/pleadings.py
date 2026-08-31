@@ -3,6 +3,8 @@ from __future__ import annotations
 import datetime as dt
 import re
 
+from . import citations
+
 # --------------------------------------------------------------------------
 # Code-owned pleading safety machinery (SoW Sections 1.4.3 and 4.6).
 #
@@ -66,7 +68,13 @@ any way, note the following:**
 # Non-greedy to the first closing bracket, DOTALL because a marker can wrap
 # across lines in the model's output.
 REQUIRED_MARKER = re.compile(
-    r"\[(?:ELEMENTS|ADDITIONAL MATERIAL) REQUIRED.*?\]", re.DOTALL
+    r"\[(?:ELEMENTS|ADDITIONAL MATERIAL|AUTHORITY) REQUIRED.*?\]"
+    # Phase 2b: the citation-verification markers are highlighted by the same
+    # machinery. A [REMOVED — ...] marker in an exported Word or PDF document
+    # is MORE important for a reviewer to notice than a gap marker, not less:
+    # it records that the tool deleted a case the draft relied on.
+    "|" + citations.VERIFICATION_MARKER_PATTERN,
+    re.DOTALL,
 )
 
 

@@ -9,6 +9,22 @@ inputs:
     label: Legal issue
     placeholder: "State the issue the memo should address, e.g. 'Is the landlord entitled to terminate for the alleged arrears?'"
 
+  # Phase 2b. `control: true` keeps the mode out of the embed query and out of
+  # the prompt's REQUEST section — it steers HOW the task runs, it is not
+  # content. The prompt effect is applied in code by build_system_prompt; the
+  # option strings must match prompts.AUTHORITY_MODE_OPTIONS exactly.
+  #
+  # "Matter-only" is FIRST and therefore the default: a lawyer who does not
+  # think about this field gets Phase 1's behaviour, not model-supplied case law.
+  - name: authority_mode
+    type: radio
+    required: false
+    control: true
+    label: Authority
+    options:
+      - Matter-only
+      - Matter + CanLII case authority
+
 retrieval_query: ""
 top_k: 12
 
