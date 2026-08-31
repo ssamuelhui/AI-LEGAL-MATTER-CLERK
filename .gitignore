@@ -51,3 +51,15 @@ data/adversarial_matter/
 !data/.gitkeep
 !data/test_matter/.gitkeep
 !data/adversarial_matter/.gitkeep
+
+# Phase 3 Session 3 packaging artifacts.
+# vendor/ (~98 MB of Tesseract + Poppler) and models/ (~133 MB of ONNX
+# weights) are large binaries reproducible from scripts/stage_vendor.ps1 and
+# scripts/fetch_model.ps1. vendor/VERSIONS.txt records the exact upstream
+# versions, so the build stays reproducible without committing the binaries.
+vendor/
+models/
+
+# Data-directory layout marker, written at first run (in a source checkout
+# the data directory is the repo root).
+/version.txt

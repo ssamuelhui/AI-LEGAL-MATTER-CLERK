@@ -36,6 +36,7 @@ import chromadb
 from chromadb.api import ClientAPI
 
 from .ingest import Chunk
+from .paths import data_path
 
 # Chroma's HNSW index is configured per collection at creation time. Kept here
 # rather than inline so every collection this module creates is provably
@@ -128,11 +129,14 @@ _CLIENT_PATH: str | None = None
 
 
 def default_store_path() -> Path:
-    """Where the vector store lives: $CHROMA_DB_PATH, else <repo>/data/chroma."""
+    r"""Where the vector store lives: $CHROMA_DB_PATH, else <data_dir>/data/chroma.
+
+    <data_dir> is the repo root in a source checkout and
+    %LOCALAPPDATA%\MatterClerk in a bundle -- see paths.data_dir()."""
     env = os.environ.get("CHROMA_DB_PATH")
     if env:
         return Path(env)
-    return Path(__file__).resolve().parents[2] / "data" / "chroma"
+    return data_path("data/chroma")
 
 
 def connect(path: str | Path | None = None) -> ClientAPI:

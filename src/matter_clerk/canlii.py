@@ -66,6 +66,8 @@ from typing import Any
 
 import requests
 
+from .paths import data_path
+
 log = logging.getLogger("matter_clerk.canlii")
 
 BASE_URL = "https://api.canlii.org/v1"
@@ -441,8 +443,7 @@ def _default_usage_path() -> Path:
     override = os.environ.get("MATTER_CLERK_CANLII_USAGE")
     if override:
         return Path(override)
-    # this file: <repo>/src/matter_clerk/canlii.py -> parents[2] == <repo>
-    return Path(__file__).resolve().parents[2] / "logs" / "canlii_usage.json"
+    return data_path("logs/canlii_usage.json")
 
 
 # --------------------------------------------------------------------------

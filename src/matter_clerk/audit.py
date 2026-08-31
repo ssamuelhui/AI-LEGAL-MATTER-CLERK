@@ -6,6 +6,8 @@ import os
 import sys
 from pathlib import Path
 
+from .paths import data_path
+
 # --------------------------------------------------------------------------
 # Append-only audit log (SoW Section 1.4.1 Part 4).
 #
@@ -21,8 +23,7 @@ def audit_log_path() -> Path:
     override = os.environ.get("MATTER_CLERK_AUDIT_LOG")
     if override:
         return Path(override)
-    # this file: <repo>/src/matter_clerk/audit.py -> parents[2] == <repo>
-    return Path(__file__).resolve().parents[2] / "logs" / "audit.jsonl"
+    return data_path("logs/audit.jsonl")
 
 
 def log_event(event: str, **fields) -> Path:

@@ -6,6 +6,8 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from .paths import data_path
+
 # --------------------------------------------------------------------------
 # Matter persistence (Day 4a).
 #
@@ -130,22 +132,22 @@ class MatterFile:
 # --------------------------------------------------------------------------
 # Paths & connection
 # --------------------------------------------------------------------------
-def _repo_root() -> Path:
-    # this file: <repo>/src/matter_clerk/matters.py -> parents[2] == <repo>
-    return Path(__file__).resolve().parents[2]
-
-
 def db_path() -> Path:
-    """Location of the SQLite DB. Overridable via MATTER_CLERK_DB (tests)."""
+    r"""Location of the SQLite DB. Overridable via MATTER_CLERK_DB (tests).
+
+    Phase 3 Session 3: resolves under paths.data_dir() rather than the repo
+    root. In a source checkout those are the same directory, so this is a
+    no-op for development; in a bundle it moves the DB out of the read-only
+    install directory and into %LOCALAPPDATA%\MatterClerk."""
     override = os.environ.get("MATTER_CLERK_DB")
-    return Path(override) if override else _repo_root() / "matter_clerk.db"
+    return Path(override) if override else data_path("matter_clerk.db")
 
 
 def matters_store_root() -> Path:
     """Root of the on-disk matter file store. Overridable via
     MATTER_CLERK_MATTERS_DIR (tests)."""
     override = os.environ.get("MATTER_CLERK_MATTERS_DIR")
-    return Path(override) if override else _repo_root() / "data" / "matters"
+    return Path(override) if override else data_path("data/matters")
 
 
 def stored_path_for(matter_id: int, sha256: str, suffix: str) -> Path:

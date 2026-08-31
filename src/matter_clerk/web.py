@@ -213,6 +213,19 @@ def create_app() -> Flask:
     app.secret_key = os.urandom(24)
 
     # ----------------------------------------------------------------------
+    # Liveness probe (Phase 3 Session 3).
+    #
+    # The packaged launcher polls this to decide when the server is actually
+    # serving before it opens a browser, rather than sleeping a guessed number
+    # of seconds. The "app" field is deliberately a fixed marker string: it
+    # lets a caller tell "Matter Clerk is up on this port" apart from "some
+    # unrelated process holds this port", which a 200 alone would not.
+    # ----------------------------------------------------------------------
+    @app.route("/healthz")
+    def healthz():
+        return {"app": "matter-clerk", "ok": True}
+
+    # ----------------------------------------------------------------------
     # Render helpers (kept inside create_app so url_for is available)
     # ----------------------------------------------------------------------
     def render_ad_hoc(status=200, **kw):

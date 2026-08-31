@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import email
 import logging
+import os
 import re
 from dataclasses import dataclass
 from email import policy
@@ -18,10 +19,33 @@ from pdf2image import convert_from_path
 from PIL import Image
 from pydantic import BaseModel
 
+from .paths import poppler_bin_dir, tesseract_exe, tessdata_dir
+
 log = logging.getLogger("matter_clerk")
 
 CHUNK_TARGET_TOKENS = 700
 CHUNK_OVERLAP_TOKENS = 100
+
+# --------------------------------------------------------------------------
+# Bundled OCR binaries (Phase 3 Session 3).
+#
+# `pytesseract` and `pdf2image` shell out to tesseract.exe and pdftoppm.exe.
+# Before this change both had to be on the system PATH, which a packaged app
+# installed by a non-technical user cannot assume. paths.tesseract_exe() /
+# paths.poppler_bin_dir() return the vendored copies when present and None
+# otherwise -- None meaning "fall back to PATH", so a developer checkout that
+# has not run scripts/stage_vendor.ps1 behaves exactly as it did before.
+# --------------------------------------------------------------------------
+_TESSERACT_EXE = tesseract_exe()
+if _TESSERACT_EXE is not None:
+    pytesseract.pytesseract.tesseract_cmd = str(_TESSERACT_EXE)
+    _TESSDATA = tessdata_dir()
+    if _TESSDATA is not None:
+        # setdefault, not assignment: a user who has deliberately pointed
+        # TESSDATA_PREFIX at extra language packs keeps their setting.
+        os.environ.setdefault("TESSDATA_PREFIX", str(_TESSDATA))
+
+_POPPLER_BIN = poppler_bin_dir()
 
 OCR_DPI = 300
 OCR_TIMEOUT_SECONDS = 30
@@ -49,7 +73,11 @@ class Chunk:
 
 def _render_page(pdf_path: Path, page_no: int, dpi: int = OCR_DPI) -> Image.Image:
     images = convert_from_path(
-        str(pdf_path), dpi=dpi, first_page=page_no, last_page=page_no
+        str(pdf_path),
+        dpi=dpi,
+        first_page=page_no,
+        last_page=page_no,
+        poppler_path=str(_POPPLER_BIN) if _POPPLER_BIN is not None else None,
     )
     return images[0]
 
@@ -84,8 +112,10 @@ def extract_pdf_pages(
             AND the page image was not effectively blank. Truly-blank pages
             (>= BLANK_FRACTION near-white at OCR_DPI) are silently dropped.
 
-    System dependencies (must be on PATH): Tesseract OCR (`tesseract --version`)
-    and Poppler (`pdftoppm -v`). The Python wrappers `pytesseract` and
+    System dependencies: Tesseract OCR and Poppler. In a packaged build these
+    are vendored into the bundle and located automatically; in a source
+    checkout they come from vendor/ (see scripts/stage_vendor.ps1) or, failing
+    that, from the system PATH. The Python wrappers `pytesseract` and
     `pdf2image` shell out to these binaries; pip installs alone are not enough.
     """
     reader = pypdf.PdfReader(str(pdf_path))

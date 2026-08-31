@@ -437,3 +437,63 @@ Two-stage because catchwords cost one API call each. Stage 1 ranks the whole poo
 **Decision:** Chunk within each page independently using `tiktoken` cl100k_base for token counting; chunk size 700, overlap 100. Every chunk maps to exactly one page citation.
 **Alternatives considered:** Cross-page chunks with a page-range citation (introduces a "which page does this quote come from" ambiguity that the citation discipline can't tolerate); cross-page chunks pinned to the first page (a quiet lie).
 **Consequences:** Very short pages produce small chunks. Retrieval quality is unaffected. Citation honesty is preserved.
+
+## 2026-08-30: Packaged as a PyInstaller onedir bundle (Phase 3 Session 3)
+**Context:** The tool has to reach Ontario lawyers who have no Python, cannot install Docker, and in many cases cannot reach PyPI or Hugging Face through corporate HTTPS inspection. Session 1 removed the Docker dependency by moving to embedded ChromaDB. This session removes the Python dependency.
+**Decision:** PyInstaller in **onedir** mode, entry point `matter_clerk_launcher.py`, console visible, built by `build_windows.ps1` from `matter_clerk.spec`.
+
+Onefile was rejected: it re-extracts the entire bundle to `%TEMP%` on every launch, which at 542 MB is a large write and tens of seconds of startup, every single time, and it makes crash tracebacks point at directories that no longer exist. Onedir starts in five to ten seconds and can be inspected with a file manager.
+
+The console stays visible for now. A windowed build whose Flask server dies on startup leaves the user with nothing to report; `console=False` is a one-word change in the spec once the build has been trusted.
+
+**Alternatives considered:** cx_Freeze and Nuitka (both viable; PyInstaller has by far the most Windows-specific hook coverage for this dependency set, which is where the risk actually lives); shipping a Python installer plus a pip install script (returns us to exactly the corporate-network problem we are packaging to escape).
+**Consequences:** The build must run on Windows. The output is unsigned, so SmartScreen will warn on first run and some corporate AV will quarantine it — a known, accepted cost, since code signing is deferred. `vendor/` and `models/` are gitignored; reproducibility comes from `scripts/stage_vendor.ps1` (which asserts binary versions) and `vendor/VERSIONS.txt` rather than from committed binaries.
+
+## 2026-08-30: sentence-transformers + torch replaced by ONNX Runtime
+**Context:** Packaging exposed a cost that did not matter when everything ran from a checkout: `torch` is 528 MB installed (360 MB of it DLLs), and it drags in `transformers` (102 MB), `scipy` (117 MB) and `sklearn` (43 MB). A bundle carrying all of it measured out at an estimated 1.1-1.5 GB — for a single 384-dimension embedding model. Torch is also the most fragile thing to freeze on Windows, because of its dynamic DLL loading.
+**Decision:** Run `BAAI/bge-small-en-v1.5` through `onnxruntime` + `tokenizers` instead. `embed.py` reimplements the three steps sentence-transformers was performing, which the model's own `modules.json` spells out exactly: WordPiece tokenize (lowercasing lives in the tokenizer's normalizer), BERT forward pass, then **CLS pooling** — not mean pooling, and not the BERT pooler dense layer — followed by L2 normalization.
+
+This was viable because the entire torch surface in this codebase was one 26-line file. `embed()` and `embedding_dimension()` are the only public functions, and `pipeline.py` and `discovery.py` reach the model exclusively through them.
+
+`onnxruntime` was already installed as a chromadb dependency, so the swap adds no new transitive weight.
+
+**The gate:** the change is only safe if it is invisible to retrieval, so it was made conditional on a test rather than on confidence. `tests/acceptance/verify_embedding_parity.py` re-embeds the document text stored in the live Chroma collections and compares against the vectors sentence-transformers wrote during earlier phases — then, more importantly, checks that top-k retrieval returns identical chunk ids in identical order for both backends. Result: 67 stored chunks, worst-case cosine 1.000000 against a 0.9999 floor; 45 query/collection pairs, zero reordering. Existing collections did not need re-indexing.
+
+**Alternatives considered:** keeping torch and shipping a ~1.4 GB bundle (rejected: past the size the user set as problematic, and the least reliable thing to freeze); an int8-quantized ONNX model at ~33 MB (rejected: real vector drift against collections already on disk, to save 100 MB that is not the binding constraint); downloading the model on first run (rejected on the same corporate-network grounds as everything else in this session).
+**Consequences:** Bundle is 542 MB instead of ~1.4 GB. `EMBEDDING_MODEL` now names the one model the build can serve; anything else raises, rather than silently returning bge vectors under another model's name and quietly poisoning a collection. Adding a second embedding model in future means exporting it to ONNX, not just changing an environment variable — a deliberate trade of flexibility for a build that ships.
+
+## 2026-08-30: Read-only resources and writable data are resolved separately
+**Context:** A packaged app installs to Program Files and cannot write there, but every path in the codebase resolved to `Path(__file__).resolve().parents[2]` — the repo root — for both the prompt templates it reads and the SQLite DB it writes.
+**Decision:** `src/matter_clerk/paths.py` splits the two: `resource_path(rel)` for read-only things shipped with the code (prompt templates, HTML templates, model weights, vendored binaries), resolving under `sys._MEIPASS` when frozen; `data_path(rel)` for writable state (`matter_clerk.db`, `data/matters`, `data/chroma`, `logs`), resolving to `platformdirs.user_data_dir("MatterClerk", appauthor=False)` when frozen.
+
+`appauthor=False` is load-bearing: platformdirs defaults appauthor to the appname, which would produce `...\Local\MatterClerk\MatterClerk`.
+
+Resolution order for data: `MATTER_CLERK_DATA_DIR`, then platformdirs if frozen, then **the repo root if running from source**. That last carve-out is the point of the design — without it, running from a checkout after this change would silently abandon the developer's existing database, matter files and Chroma collections. Verified after the migration: every path (`db_path`, `matters_store_root`, `audit_log_path`, the CanLII usage counter, `default_store_path`, `templates_dir`) resolves byte-identically to its pre-change value in a source checkout.
+
+Per-item overrides that already existed (`MATTER_CLERK_DB`, `MATTER_CLERK_MATTERS_DIR`, `MATTER_CLERK_AUDIT_LOG`, `CHROMA_DB_PATH`) still take precedence over all of it, so the acceptance tests were unaffected.
+
+The data directory is created silently on first launch, and carries a `version.txt` layout marker (currently `1`). Nothing reads the marker yet; it exists so a later release can tell a fresh install from one written by an older version without inferring it from which files happen to be present.
+**Consequences:** Two path functions instead of one, and the distinction has to be made correctly at each call site — but conflating them is precisely how an application ends up trying to write to Program Files.
+
+## 2026-08-30: OCR binaries vendored into the bundle
+**Context:** `pytesseract` and `pdf2image` shell out to `tesseract.exe` and `pdftoppm.exe`. Until now both had to be on the system PATH — an assumption a packaged application installed by a non-technical user cannot make.
+**Decision:** `scripts/stage_vendor.ps1` copies the pieces actually used into `vendor/`: `tesseract.exe` plus its DLLs and `tessdata/eng.traineddata`; `pdftoppm.exe`, `pdfinfo.exe` (pdf2image needs both — one renders, one counts pages) plus their DLLs. `paths.tesseract_exe()` and `paths.poppler_bin_dir()` return the vendored copies when present, or `None`, which means "fall back to PATH" and preserves the old behaviour for a checkout that has not run the staging script.
+
+Excluded to save ~35 MB: roughly 25 Tesseract training executables, `doc/`, and `osd.traineddata` (10.5 MB, needed only for `--psm 0/1`; `pytesseract.image_to_string` uses the default psm 3).
+
+The binaries are declared in the spec as `datas`, not `binaries`. PyInstaller rewrites and relocates `binaries` entries, which would break the exe-relative discovery `tesseract.exe` uses to find its own `tessdata/` directory.
+
+**Also vendored: the tiktoken BPE cache.** `ingest.py` builds its `cl100k_base` encoder at module import, and tiktoken fetches the ranks from `openaipublic.blob.core.windows.net` on a cache miss — so on an offline machine that is an import-time crash, not a degraded feature. The launcher points `TIKTOKEN_CACHE_DIR` at the bundled copy before anything imports `matter_clerk.ingest`.
+**Consequences:** ~99 MB of the bundle. Endpoint protection that blocks process spawning will break OCR specifically, while leaving the rest of the app working — worth knowing when a managed machine reports OCR failures and nothing else.
+
+## 2026-08-30: The launcher probes the port instead of relying on bind failure
+**Context:** The intended design was to let the port bind fail when a second instance starts, and turn that failure into a readable message. Embedded ChromaDB is owned by exactly one process, so a second instance sharing the data directory is a corruption risk, not just a UX wrinkle.
+**Decision:** Probe the port with a connect attempt before binding.
+
+The original design does not work on Windows. Werkzeug sets `SO_REUSEADDR`, and where Linux rejects a second bind to a live address, **Windows accepts it** — verified empirically during this session: a second launcher bound an already-serving 5050 and started handling requests without raising. Bind failure is therefore not a usable in-use signal here, and relying on it would have let two processes open the same Chroma directory for writing.
+
+A `connect_ex` probe that succeeds means someone is listening; the launcher prints a message naming the likely cause and how to override the port, and exits 1. The `OSError` handler around `make_server` is kept as a second line of defence and is the correct path on other platforms.
+
+The launcher also waits for `GET /healthz` — a new route returning a fixed `{"app": "matter-clerk"}` marker — before opening the browser, rather than sleeping a guessed number of seconds. `make_server` has already bound the socket by the time the polling thread starts, so this normally succeeds on the first attempt; on a slow machine it waits longer instead of opening a browser at a connection-refused page.
+**Alternatives considered:** a lock file (more moving parts, and it can be left stale by a crash; the port is already the contended resource); falling back to the next free port (actively harmful here — it would let two instances run against one ChromaDB, which is the failure being prevented).
+**Consequences:** Single-instance protection is a side effect of the port being fixed. Two instances are still possible if a user deliberately sets different `MATTER_CLERK_PORT` values against the same data directory; a lock file would be the answer if that ever shows up in practice.

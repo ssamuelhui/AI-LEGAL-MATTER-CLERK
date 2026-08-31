@@ -8,6 +8,8 @@ from typing import Literal, Optional
 import yaml
 from pydantic import BaseModel
 
+from .paths import resource_path
+
 # --------------------------------------------------------------------------
 # The non-removable safety / citation-discipline clause (SoW Section 1.4).
 #
@@ -668,8 +670,7 @@ def templates_dir() -> Path:
     override = os.environ.get("MATTER_CLERK_PROMPTS_DIR")
     if override:
         return Path(override)
-    # this file: <repo>/src/matter_clerk/prompts.py  ->  parents[2] == <repo>
-    return Path(__file__).resolve().parents[2] / "prompts" / "templates"
+    return resource_path("prompts/templates")
 
 
 @lru_cache(maxsize=1)

@@ -16,6 +16,24 @@ The point of this file is to record decisions we *consciously* punted on, so the
 
 ---
 
+## Auto-open browser sometimes fails on double-click launch
+**Deferred from:** Phase 3 Session 3 verification (August 2026)
+**Trigger to revisit:** Session 5 (the installer creates a Start Menu shortcut, which is a shell launch — the same context that fails, so the installer makes this the *default* path rather than an edge case). Sooner if a lawyer reports it.
+
+**Context:** Launching `MatterClerk.exe` by double-clicking in File Explorer sometimes fails to open the browser, even though Flask starts normally and the app is reachable. Launching the same exe from PowerShell (`.\dist\MatterClerk\MatterClerk.exe`) works reliably. Not a blocker — the console window prints the URL and the user can navigate manually — but a lawyer who double-clicks a shortcut and sees a console window with no browser will read the app as broken.
+
+**Why Session 3 verification did not catch this — worth knowing before re-testing.** The Session 3 confirmation that "the browser opens" was produced by setting the `BROWSER` environment variable to a marker script and observing that the launcher invoked it with the correct URL. That genuinely proved the readiness-poll logic and the URL construction, and both are fine. But setting `BROWSER` routes `webbrowser.open()` down the `GenericBrowser` path — a plain subprocess spawn — which is **not** the path a real launch takes. With `BROWSER` unset, Windows uses `webbrowser.WindowsDefault`, which calls `os.startfile()`. So the failing code path was never exercised. Any re-test must run without `BROWSER` set, and must launch from Explorer, not a terminal.
+
+**Leading hypothesis: COM is not initialized on the browser thread.** `os.startfile()` wraps `ShellExecuteW`. ShellExecute delegates to shell extensions and therefore expects COM to be initialized on the calling thread; Microsoft's own documentation says to call `CoInitializeEx` before `ShellExecuteEx` for this reason. The launcher opens the browser from a `threading.Thread(target=_open, daemon=True)` (see `matter_clerk_launcher.py`), and Python does not initialize COM on worker threads. Whether that matters depends on which handler the shell picks for an `http:` URL, which in turn depends on the default browser and on the launching process's own apartment state — which is exactly the kind of dependency that would make this fail from Explorer, succeed from PowerShell, and behave intermittently. This is a hypothesis, not a diagnosis; it has not been confirmed against a failing run.
+
+**Options under consideration:**
+- **Initialize COM on the browser thread.** `ctypes.windll.ole32.CoInitializeEx(None, 2)` (apartment-threaded) at the top of `_open`, with `CoUninitialize` on the way out. Smallest change, directly tests the hypothesis, and if the hypothesis is right it is the correct fix rather than a workaround.
+- **Do not open the browser from a worker thread at all.** Poll `/healthz` in the thread but hand the actual open back to the main thread before `serve_forever()`. Sidesteps the thread-context question entirely; costs a little launcher restructuring.
+- **Bypass `webbrowser` and spawn the shell explicitly** — `subprocess.Popen(["cmd", "/c", "start", "", url], creationflags=CREATE_NO_WINDOW)`. Blunt but very predictable, and it is what several packaged Python apps end up doing. Loses `webbrowser`'s `BROWSER`-variable courtesy, which nobody in this deployment is using.
+- **Surface the URL better and stop treating auto-open as load-bearing.** Print the URL prominently, and have the installer's shortcut point at a `.url` file or a one-line launcher that opens the browser itself. Worth doing *regardless* of which fix is chosen: the browser can fail to open for reasons entirely outside our control (no default browser registered, locked-down machine), and the console should never leave the user without a next step.
+
+**Check while in here:** whether the failure is actually intermittent or is fully determined by launch context. "Sometimes" from a handful of double-clicks may just be an unrecognised deterministic trigger — for example first-launch-after-boot, or whether a browser process is already running. Nailing that down first will make the fix much easier to verify, since an intermittent bug that is really deterministic is easy to declare fixed by accident.
+
 ## Statutory authority in authority mode (Condominium Act, Limitations Act, etc.)
 **Deferred from:** Phase 2b polish (August 28, 2026)
 **Trigger to revisit:** Phase 3, or sooner if lawyer testing shows Draft Memo answers on statute-driven issues are dominated by `[AUTHORITY REQUIRED]` markers. The procedure tracker's rule-source fetching (SoW §4.5) is the natural place to build the retrieval channel this needs — revisit when that work starts, since the two share a fetcher.

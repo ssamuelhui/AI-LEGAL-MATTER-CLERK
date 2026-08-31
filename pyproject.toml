@@ -14,7 +14,15 @@ dependencies = [
     # =None, query/get column-oriented results) is the 1.x surface; 0.4.x is a
     # materially different API and would fail at import-time usage, not install.
     "chromadb>=1.5,<2",
-    "sentence-transformers>=3.0",
+    # Phase 3 Session 3: sentence-transformers + torch were replaced by ONNX
+    # Runtime. Same model, same vectors -- verified against the live store by
+    # tests/acceptance/verify_embedding_parity.py -- and ~700 MB less to ship.
+    # chromadb already pulls both of these in, but matter_clerk.embed imports
+    # them directly, so they are declared explicitly here on the same reasoning
+    # as `requests` below.
+    "onnxruntime>=1.17",
+    "tokenizers>=0.15",
+    "numpy>=1.26",
     "openai>=1.50",
     "pydantic>=2.0",
     "python-dotenv>=1.0",
@@ -35,6 +43,9 @@ dependencies = [
     "python-docx>=1.1",
     "reportlab>=4.0",
     "openpyxl>=3.1",
+    # Phase 3 Session 3: resolves the packaged build's writable data directory
+    # (%LOCALAPPDATA% on Windows). See src/matter_clerk/paths.py.
+    "platformdirs>=4.2",
 ]
 
 [project.scripts]
