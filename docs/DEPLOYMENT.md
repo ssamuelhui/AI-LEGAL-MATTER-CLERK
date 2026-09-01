@@ -551,3 +551,67 @@ Order is chosen per matter from the **Sort** control and stored in
 `<data_dir>/ui_prefs.json` (not the database — no schema change, no migration).
 The same order drives the file list, the scope selector, and Compare Clauses'
 column order.
+
+---
+
+## 18. Exhaustive mode (v1.0.3)
+
+Timeline, Summarize and Find Entities can read every chunk of every selected
+file instead of a retrieved top-k. Opt-in, never automatic.
+
+| Task | Control | Options |
+|---|---|---|
+| Timeline | `detail_level` | Concise / Detailed / **Exhaustive** |
+| Summarize | `mode` | Standard / **Exhaustive (preview)** |
+| Find Entities | `mode` | Standard / **Exhaustive (preview)** |
+
+The first option is the default in each case and is byte-identical to v1.0.2.
+
+### Why it was needed
+
+`search_across_collections` merges to a **global** top-k, so standard modes send
+a matter-wide total of 12-28 chunks regardless of file count — 21% of a 9-file
+matter, roughly 7% of a 28-file one. Full figures in ARCHITECTURE.
+
+### Execution
+
+Runs execute on a background thread; state lives in `<data_dir>/runs/<id>.json`
+and is polled at `/runs/<id>/status` every 1.5 s. Closing the browser does not
+stop a run. A run interrupted by an app restart reports as `interrupted`.
+
+One run per matter, enforced by `<data_dir>/runs/matter-<id>.lock`. A second
+submission redirects to the run already in progress.
+
+Cancel is a flag on disk, honoured at batch boundaries. Completed batches are
+kept and the partial result says so.
+
+### Model and cost
+
+Exhaustive runs are pinned to `anthropic/claude-opus-4.7`, overriding `MODEL`
+from `.env`, and the model is named in the pre-run dialog, the run page and the
+result. **This departs from the SoW's MiMo Pro default and applies to
+exhaustive runs only.**
+
+Measured on the 9-file dev matter:
+
+```
+full matter   67 chunks   54,542 in / 16,989 out   169.5 s   $0.6974   63 rows
+2-file subset  5 chunks    4,258 in /  2,287 out    23.2 s   $0.0785    7 rows
+```
+
+Pricing lives in `exhaustive.MODEL_PRICING` (fetched 2026-09-01). Token
+estimates apply `CLAUDE_TOKEN_INFLATION = 1.65` because `cl100k_base` is
+OpenAI's tokenizer and undercounts Anthropic billing by ~1.57x on this content.
+
+### Batching
+
+Single pass below `INPUT_BUDGET_TOKENS = 400,000` (~840 chunks), which covers
+every realistic matter. Above it, files are packed whole into batches and the
+outputs concatenated. A failed batch is logged, named on the result, and does
+not abort the run.
+
+### Deduplication
+
+Exact repeats **within one file** are collapsed (chunk-overlap artefacts).
+Cross-file duplicates are deliberately preserved — see ARCHITECTURE. The run
+summary always states the count, including when it is zero.

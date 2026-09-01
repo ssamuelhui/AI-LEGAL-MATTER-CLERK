@@ -711,3 +711,90 @@ The audit log records `scope` and `scoped_file_ids` **only when the scope is not
 **Decision:** A quiet "Generate support report" link at the foot of the matters page with explanatory hover text, and a plain-English README written beside every generated report saying what to send, to whom, what it contains, and — the part that decides whether it gets sent — what it does not.
 
 (For the record: the report was never CLI-only. It shipped in v1.0.1 as a button on the matters page and on the error page. What changed here is tone, placement, and the README.)
+
+## 2026-09-01: The "not detailed enough" complaint was a global top-k cap (Session 8)
+**Context:** The lawyer asked for exhaustive Timeline and Summarize because the output "isn't detailed enough — we don't want the software to decide what to include and exclude." The natural reading is a prompt problem.
+**Decision:** Measure before building. It was not the prompt.
+
+`DETAILED_TIMELINE_INSTRUCTION` has said "Capture EVERY dated event and material action... Do not summarize or omit events" since Day 4c-a. The defect is upstream: `search_across_collections` retrieves top-k from each file and then **merges to a GLOBAL top-k**, so a Timeline sends `top_k` chunks for the entire matter regardless of file count.
+
+Measured on the 9-file dev matter (67 chunks, 31,806 tokens):
+
+| mode | chunks to model | coverage |
+|---|---|---|
+| Timeline Concise | 14 | 20.9% |
+| Timeline Detailed | 28 | 41.8% |
+| Summarize Standard | 12 | 17.9% |
+| Find Entities Standard | 16 | 23.9% |
+
+Because the cap is a matter-wide total, a 28-file matter still gets 14 chunks — about 7% coverage. This is also the second half of the Session 6a report ("only 2 events from 28 files"), the first half being bad OCR. The model was told to be exhaustive; it was never shown the documents.
+
+**Consequences:** Exhaustive mode is the sanctioned fix. The caps on Concise/Detailed/Standard were deliberately NOT raised, because that would break the byte-identical guarantee for lawyers who touch nothing — but "Detailed" remains much weaker than its name suggests, and that is recorded here rather than left to be rediscovered.
+
+## 2026-09-01: Exhaustive is a sibling path, not a mode of the standard one
+**Decision:** `run_exhaustive_matter_query` sits beside `run_matter_query` rather than adding a branch inside it. The two differ in exactly one thing — what reaches the model — and a branch in the middle of the shared retrieval path is a branch that can misfire into the standard modes.
+
+They share the tail. `_answer_and_build` was split so that generation (`_ask_model`) and everything after it (`_build_result_from_answer`: citation extraction, verification, structured intermediates, PipelineResult assembly) are separable, and exhaustive mode supplies a `precomputed_answer` and reuses the rest unchanged.
+
+Batch user messages are built by the SAME `build_user_message` the standard path uses, so the `[SOURCE: ...]` headers and CONTEXT format the model sees are byte-identical. Exhaustive mode changes which passages are sent, never how they are presented — citation behaviour is therefore unchanged by construction rather than by testing.
+
+**Byte-identical guarantee, asserted not assumed:** the exhaustive instruction is appended only when `is_exhaustive()` is true AND the task is one of three, keyed off `template.id`, so a stray `mode` value on another task cannot alter its prompt. Twelve prompt-assembly cases cover the matrix.
+
+## 2026-09-01: Batching is an overflow path, not the architecture
+**Context:** The brief assumed the context window could not hold a matter and specified a batching pipeline with cross-batch aggregation and fuzzy deduplication.
+**Decision:** Single pass by default; batch only above `INPUT_BUDGET_TOKENS = 400,000`.
+
+The measurements do not support batching at realistic sizes. `xiaomi/mimo-v2.5-pro` and `anthropic/claude-opus-4.7` both offer ~1,000,000-token windows, and the whole dev matter is 31,806 tokens of chunk text. The budget is set at 400k rather than near the limit because a reasoning model's quality degrades well before its context limit does — batch early rather than serve a degraded single pass.
+
+Single pass is also what makes deduplication a non-problem in the normal case: one call sees the whole email chain, quoted replies included, and merges them itself.
+
+Batching keeps files whole unless one file alone exceeds the budget, because splitting a document across calls is what creates cross-batch duplicates in the first place.
+
+## 2026-09-01: Deduplication is per-file and exact; cross-file is off
+**Decision:** Collapse exact repeats within a single file. Never merge across files. Never fuzzy-match.
+
+Within one file an exact repeat is an artefact of `CHUNK_OVERLAP_TOKENS = 100`, not a second occurrence. Across files it is usually two pieces of evidence about the same fact, and collapsing them destroys corroboration a lawyer needs to see.
+
+Fuzzy matching is the wrong instrument regardless. "Notice served on tenant" and "Notice served on landlord" score ~90% similar by any string metric and are opposite facts. Any threshold loose enough to merge genuine restatements is loose enough to merge distinct events — and a silently merged event is a MISSING event, which is precisely the complaint this feature exists to answer.
+
+**Suppression is always stated, never inferred from silence.** The run summary says "N exact per-file duplicates collapsed" or "No per-file duplicates were collapsed." The presence of the count is the safety signal; an absent line would be indistinguishable from a line nobody wrote.
+
+## 2026-09-01: Exhaustive runs are background tasks, decided by measurement
+**Context:** The initial proposal argued no async layer was needed, on the reasoning that exhaustive is one model call and the existing synchronous POST already serves Detailed.
+**Decision:** That was wrong, and one real run settled it. A single-batch exhaustive Timeline over 9 files took **169.5 seconds**; a 28-file matter extrapolates to six to nine minutes. Far past what a form POST should hold open.
+
+Runs execute on a background thread with state in `<data_dir>/runs/<id>.json`, polled every 1.5 s. The file is the source of truth, not the thread, which is what lets the browser close and reopen and lets a run interrupted by a restart report itself as INTERRUPTED rather than showing a progress bar that will never move.
+
+One run per matter, via a lock file. A second attempt redirects to the run already going rather than erroring — a lawyer who clicks twice wants to see the run, not be corrected.
+
+**Two bugs found by running it, both worth recording:**
+
+*Windows `os.replace` is not reliable.* It raises PermissionError (WinError 5) intermittently when a scanner or concurrent reader holds the destination, and it killed a run before its first batch. Now a bounded retry with an in-place fallback: a torn state file read by one poll is a far smaller problem than a run that dies at startup.
+
+*A staleness check needs a heartbeat, not batch boundaries.* Progress was reported only between batches, so during a 170-second single batch the timestamp went stale and `load()` declared its own live run dead. A 20-second heartbeat thread now runs for the life of the task. The general lesson: a liveness check whose resolution is coarser than the work it supervises will mistake slow for dead.
+
+## 2026-09-01: Exhaustive runs are pinned to a different model, and say so
+**Decision:** Exhaustive runs use `anthropic/claude-opus-4.7` and ignore `MODEL` from `.env`. The model is recorded in the run metadata, named in the pre-run dialog, and shown on the result.
+
+**This departs from CLAUDE.md and the SoW**, which specify MiMo Pro as the default provider, and the departure is recorded here deliberately. It applies to exhaustive runs only; every other task honours the configured model.
+
+Note for anyone re-deriving this: the id uses a **dot**. `anthropic/claude-opus-4-7` does not exist on OpenRouter and 404s on every call — verified against the live model list before the constant was written.
+
+## 2026-09-01: Cost estimates are measured, and cl100k is not Claude's tokenizer
+**Context:** A cost dialog that reads low is worse than no dialog.
+**Decision:** Estimate from the actual assembled prompt, then correct for the tokenizer.
+
+The first estimator counted raw chunk text and came in 17% under a real run: the `[SOURCE: ...]` header on every chunk plus the system prompt added ~23k tokens to a 31,806-token matter. Fixed by estimating from the same builders the run uses.
+
+That still left it 36% low, and the cause is more interesting: **`tiktoken`'s `cl100k_base` is OpenAI's tokenizer, and Anthropic's is different.** On this content — OCR'd legal correspondence, dense in headers, dates and punctuation — a measured run counted 34,653 by cl100k and was billed 54,542. A ratio of 1.57. `CLAUDE_TOKEN_INFLATION = 1.65` applies a rounded-up correction for Anthropic models, from a single data point, kept as a named constant with the measurement in the comment rather than buried in a formula.
+
+With both corrections the estimate brackets reality: $0.42–$0.79 shown against $0.6974 billed.
+
+**The live tally matters more than the estimate.** "Here is what you have spent so far" answers the lawyer's real question better than any pre-run band, and it comes from the provider's own usage figures rather than from our arithmetic.
+
+## 2026-09-01: Preview labelling names the mode, not the task
+**Decision:** Summarize and Find Entities offer "Exhaustive (preview)"; Timeline exhaustive ships as GA.
+
+The copy is careful in one specific way: it says the exhaustive **mode** is under evaluation, not that Summarize or Find Entities are preview features. A lawyer who concludes that Summarize itself is provisional would stop trusting a task that has been stable since Phase 1.
+
+`is_exhaustive()` matches on `startswith("Exhaustive")` rather than equality, so the visible label can change without silently switching the mode off.

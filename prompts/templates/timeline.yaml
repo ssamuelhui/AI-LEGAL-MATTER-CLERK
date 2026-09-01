@@ -13,7 +13,9 @@ inputs:
     required: false
     label: Detail level
     control: true
-    options: ["Concise", "Detailed"]
+    # Session 8: "Exhaustive" reads every passage of every selected file rather
+    # than a retrieved top-k. Listed last so the first option stays the default.
+    options: ["Concise", "Detailed", "Exhaustive"]
 
 retrieval_query: "dates, chronology of events, what happened on each date, filings, hearings, notices, deadlines, when events occurred"
 top_k: 14

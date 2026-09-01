@@ -199,6 +199,19 @@
     </div>
   </details>
 
+  <div class="exh-note" id="exh-note" hidden>
+    <strong>Exhaustive mode</strong> reads every passage of every selected file
+    instead of the most relevant extracts, so nothing is filtered out for you.
+    It takes a few minutes and costs more per run. It uses
+    <code>anthropic/claude-opus-4.7</code> regardless of your configured model,
+    and the model used is recorded with the result.
+    <div id="exh-preview-note" hidden style="margin-top:6px;">
+      <strong>Preview:</strong> the exhaustive <em>mode</em> for this task is
+      still being evaluated &mdash; the task itself is not. Check its output
+      more carefully than usual.
+    </div>
+  </div>
+
   <button type="submit" id="askbtn">Run task</button>
 </form>
 <script>
@@ -346,10 +359,100 @@
     });
     update();
 
-    document.getElementById("askform").addEventListener("submit", function () {
+    // Session 8: reveal the exhaustive note whenever an exhaustive option is
+    // selected, and confirm before spending real money on a multi-minute run.
+    var exhNote = document.getElementById("exh-note");
+    var exhPreview = document.getElementById("exh-preview-note");
+
+    function exhaustiveSelected() {
+      var g = document.querySelector(".task-fields[data-task='" + taskSelect.value + "']");
+      if (!g) return null;
+      var sel = g.querySelector("select[name='detail_level'], select[name='mode']");
+      if (sel && sel.value.indexOf("Exhaustive") === 0) return sel.value;
+      return null;
+    }
+
+    function updateExhaustiveNote() {
+      var v = exhaustiveSelected();
+      if (exhNote) exhNote.hidden = !v;
+      if (exhPreview) exhPreview.hidden = !(v && v.indexOf("preview") !== -1);
+    }
+
+    groups.forEach(function (g) {
+      g.querySelectorAll("select[name='detail_level'], select[name='mode']")
+        .forEach(function (sel) {
+          sel.addEventListener("change", updateExhaustiveNote);
+        });
+    });
+    taskSelect.addEventListener("change", updateExhaustiveNote);
+    updateExhaustiveNote();
+
+    var confirmed = false;
+    document.getElementById("askform").addEventListener("submit", function (ev) {
       var b = document.getElementById("askbtn");
+
+      if (exhaustiveSelected() && !confirmed) {
+        // Ask the server what THIS selection actually costs, rather than
+        // showing a guess. The estimate uses the same builders the run does.
+        ev.preventDefault();
+        b.disabled = true;
+        b.textContent = "Checking size…";
+        var fd = new FormData(document.getElementById("askform"));
+        fetch("{{ estimate_url }}", {method: "POST", body: fd})
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            b.disabled = false;
+            b.textContent = "Run task";
+            if (d.error) { alert(d.error); return; }
+            var mins = Math.max(1, Math.round(d.seconds_low / 60)) + "-" +
+                       Math.max(2, Math.round(d.seconds_high / 60)) + " minutes";
+            var msg =
+              "Run exhaustive analysis?
+
+" +
+              "This reads every page of " + d.files + " file(s) - " +
+              d.chunks + " passages, about " +
+              d.input_tokens.toLocaleString() + " tokens of text - instead of " +
+              "the most relevant extracts.
+
+" +
+              "Expected time:  " + mins + "
+" +
+              "Estimated cost: $" + d.cost_low.toFixed(2) + " - $" +
+              d.cost_high.toFixed(2) + " in API usage
+" +
+              "Model:          " + d.model + "
+
+" +
+              (d.unreadable && d.unreadable.length
+                 ? "WARNING: " + d.unreadable.length + " selected file(s) " +
+                   "cannot be read and will be left out.
+
+" : "") +
+              "Exhaustive mode includes everything it finds, including minor " +
+              "and routine items. Expect a much longer result.
+
+" +
+              "You can close the tab while it runs and come back to it.";
+            if (window.confirm(msg)) {
+              confirmed = true;
+              document.getElementById("askform").requestSubmit();
+            }
+          })
+          .catch(function () {
+            b.disabled = false;
+            b.textContent = "Run task";
+            if (window.confirm("Could not estimate the size of this run. " +
+                               "Start the exhaustive analysis anyway?")) {
+              confirmed = true;
+              document.getElementById("askform").requestSubmit();
+            }
+          });
+        return;
+      }
+
       b.disabled = true;
-      b.textContent = "Processing…";
+      b.textContent = exhaustiveSelected() ? "Starting analysis…" : "Processing…";
     });
   })();
 </script>

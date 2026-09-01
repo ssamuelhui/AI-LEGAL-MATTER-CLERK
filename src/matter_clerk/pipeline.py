@@ -619,6 +619,10 @@ def _answer_and_build(
     collection: str = "",
     was_reindexed: bool = False,
     matter_id: int | None = None,
+    # Session 8: exhaustive mode has already made its own (possibly batched)
+    # model calls by the time it gets here, so it supplies the answer and this
+    # function does the citation + result assembly only.
+    precomputed_answer: str | None = None,
 ) -> PipelineResult:
     """Shared answer/citation/result tail for run_query and run_matter_query.
 
@@ -627,9 +631,31 @@ def _answer_and_build(
     UI can render the "Drew on" label; Step 4 will also thread it into
     build_system_prompt. None-valued lists coerce to [] (no shared-mutable
     default)."""
+    if precomputed_answer is not None:
+        answer = precomputed_answer
+    else:
+        answer = _ask_model(
+            template, structured_inputs, retrieved, model, cross_document
+        )
+    return _build_result_from_answer(
+        answer=answer, template=template, task=task,
+        structured_inputs=structured_inputs, retrieved=retrieved, model=model,
+        embed_model=embed_model, resolved_top_k=resolved_top_k,
+        pleading_warnings=pleading_warnings,
+        retrieval_warnings=retrieval_warnings, cross_document=cross_document,
+        retrieved_sources=retrieved_sources, retrieved_file_ids=retrieved_file_ids,
+        ocr_pages=ocr_pages, unreadable_pages=unreadable_pages,
+        email_metadata=email_metadata, attachment_warnings=attachment_warnings,
+        pdf_sha256=pdf_sha256, collection=collection,
+        was_reindexed=was_reindexed, matter_id=matter_id,
+    )
+
+
+def _ask_model(template, structured_inputs, retrieved, model, cross_document,
+               user_message=None):
     log.info("Asking the model ...")
     llm = LLMClient(model=model)
-    answer = llm.complete(
+    return llm.complete(
         [
             {
                 "role": "system",
@@ -648,6 +674,21 @@ def _answer_and_build(
         ]
     )
 
+
+
+def _build_result_from_answer(
+    *, answer, template, task, structured_inputs, retrieved, model, embed_model,
+    resolved_top_k, pleading_warnings, retrieval_warnings=None,
+    cross_document=False, retrieved_sources=None, retrieved_file_ids=None,
+    ocr_pages=None, unreadable_pages=None, email_metadata=None,
+    attachment_warnings=None, pdf_sha256="", collection="",
+    was_reindexed=False, matter_id=None,
+) -> PipelineResult:
+    """Citation extraction, verification and PipelineResult assembly.
+
+    Split out of _answer_and_build in Session 8 so exhaustive mode, which has
+    already made its own model calls, can reuse every step after generation
+    without a branch inside the shared path."""
     # Day 4d: for the tabular tasks the completion carries a trailing ```json
     # block. Strip it before anything renders the answer (the web UI must look
     # exactly as it did) and validate it into the structured intermediates.
@@ -1072,3 +1113,123 @@ def run_compare_clauses(
         ),
         matter_id=matter_id,
     )
+
+
+# --------------------------------------------------------------------------
+# Exhaustive mode (Session 8)
+# --------------------------------------------------------------------------
+def run_exhaustive_matter_query(
+    files: list[MatterFile],
+    task: str,
+    structured_inputs: dict,
+    matter_id: int,
+    progress=None,
+    should_cancel=None,
+) -> PipelineResult:
+    """Every chunk of every selected file, rather than a retrieved top-k.
+
+    Structurally a sibling of `run_matter_query`, not a mode of it. The two
+    differ in the one place that matters -- what reaches the model -- and
+    sharing a function would have meant a branch in the middle of the retrieval
+    path that could silently apply to the standard modes. They share the
+    answer/citation tail (`_answer_and_build`) and nothing else.
+
+    `progress(batch, batches, names, run)` is called at batch boundaries;
+    `should_cancel()` is polled there too.
+    """
+    from . import exhaustive as ex
+
+    try:
+        template = get_template(task)
+    except KeyError:
+        raise UnknownTask(f"Unknown task: {task!r}")
+    if not files:
+        raise PdfHasNoText("This matter has no ingested files to query.")
+
+    embed_model, _configured_model = _config()
+    client = connect()
+    _precheck_store(client)
+
+    log.info(f"Exhaustive run across {len(files)} file(s) ...")
+    texts, unreadable = ex.gather_all_chunks(client, files)
+    if not texts:
+        raise PdfHasNoText(
+            "None of the selected files could be read from the search index."
+        )
+
+    system_prompt = build_system_prompt(
+        template, structured_inputs, cross_document=True
+    )
+
+    def build_user(names: list[str]) -> str:
+        """The user message for one batch, via the SAME builder the standard
+        path uses -- so the CONTEXT format and [SOURCE: ...] headers the model
+        sees are byte-identical, and citation behaviour is unchanged. Exhaustive
+        mode alters which passages are sent, never how they are presented."""
+        chunks = [
+            {"source": n, "locator": f"chunk {i}", "text": t}
+            for n in names
+            for i, t in enumerate(texts.get(n) or [], start=1)
+        ]
+        return build_user_message(template, structured_inputs, chunks)
+
+    answer, run = ex.run_exhaustive(
+        texts, system_prompt, build_user,
+        model=ex.EXHAUSTIVE_MODEL,
+        should_cancel=should_cancel, on_progress=progress,
+    )
+
+    # Citations are extracted from the answer against the chunks actually sent,
+    # exactly as the standard path does against its retrieved set.
+    retrieved = [
+        {"source": name, "locator": f"chunk {i}", "text": text}
+        for name, rows in texts.items()
+        for i, text in enumerate(rows, start=1)
+    ]
+
+    warnings: list[str] = []
+    if unreadable:
+        warnings.append(
+            f"{len(unreadable)} file(s) could not be read from the search index "
+            f"and were NOT included: {', '.join(unreadable)}. This analysis is "
+            "not complete for this matter."
+        )
+    if run.failed_batches:
+        failed_files = sorted({f for b in run.failed_batches for f in b.files})
+        warnings.append(
+            f"{len(run.failed_batches)} of {len(run.batches)} batches failed. "
+            f"These files were not fully analysed: {', '.join(failed_files)}. "
+            "The results below cover the remaining files only."
+        )
+    if run.cancelled:
+        warnings.append(
+            f"Cancelled after {len([b for b in run.batches if b.ok])} of "
+            f"{len(run.batches)} batches. The results below are partial."
+        )
+    # Always stated, never inferred from silence: the ABSENCE of a suppression
+    # count must not be readable as evidence that no suppression happened.
+    warnings.append(
+        f"Exhaustive mode: {run.total_chunks} passages from {len(texts)} file(s) "
+        f"sent to {run.model}. "
+        + (f"{run.collapsed_duplicates} exact per-file duplicate(s) collapsed."
+           if run.collapsed_duplicates
+           else "No per-file duplicates were collapsed.")
+    )
+
+    result = _answer_and_build(
+        template=template,
+        task=task,
+        structured_inputs=structured_inputs,
+        retrieved=retrieved,
+        model=run.model,
+        embed_model=embed_model,
+        resolved_top_k=run.total_chunks,
+        pleading_warnings=[],
+        retrieval_warnings=warnings,
+        cross_document=True,
+        retrieved_sources=list(texts.keys()),
+        retrieved_file_ids=[f.id for f in files if f.filename in texts],
+        matter_id=matter_id,
+        precomputed_answer=answer,
+    )
+    return result

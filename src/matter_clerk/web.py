@@ -25,8 +25,8 @@ from flask import (
 from werkzeug.serving import make_server
 
 from . import (
-    audit, canlii, citations, discovery, export, llm, maintenance, matters,
-    pipeline, pleadings, updater,
+    audit, canlii, citations, discovery, exhaustive, export, llm, maintenance,
+    matters, pipeline, pleadings, runs, updater,
 )
 from .prompts import (
     DEFAULT_TASK,
@@ -208,6 +208,66 @@ def _resolve_scope(conn, matter_id: int, task: str, form, queryable_files):
     return list(queryable_files), None, None
 
 
+def build_system_prompt_for(template, form):
+    """The system prompt this submission would produce -- used by the estimator
+    so the token count reflects the real prompt, not an approximation of it."""
+    from .prompts import build_system_prompt
+
+    return build_system_prompt(
+        template, _collect_web_inputs(template, form), cross_document=True
+    )
+
+
+def prompts_exhaustive_tasks():
+    from .prompts import EXHAUSTIVE_TASKS
+
+    return EXHAUSTIVE_TASKS
+
+
+def _start_exhaustive(state, scope_files, task, structured_inputs, matter_id):
+    """Launch the background run and persist its result when it finishes.
+
+    The PipelineResult is serialised to disk rather than held in memory: the
+    whole point of the run registry is that closing the browser, or restarting
+    Flask, does not lose a run the lawyer has already paid for.
+    """
+    def work(st):
+        def progress(batch, batches, names, run):
+            runs.update(
+                st, batch=batch, batches=batches, current_files=list(names),
+                prompt_tokens=run.prompt_tokens,
+                completion_tokens=run.completion_tokens,
+                cost_usd=round(run.cost_usd, 4), seconds=round(run.seconds, 1),
+            )
+
+        result = pipeline.run_exhaustive_matter_query(
+            files=scope_files, task=task, structured_inputs=structured_inputs,
+            matter_id=matter_id, progress=progress,
+            should_cancel=lambda: runs.cancel_requested(st.run_id),
+        )
+        runs.save_result(st.run_id, result.model_dump_json())
+
+        cancelled = runs.cancel_requested(st.run_id)
+        runs.update(
+            st,
+            status=runs.CANCELLED if cancelled else runs.DONE,
+            batch=st.batches or st.batch,
+            collapsed_duplicates=getattr(result, "collapsed_duplicates", 0) or 0,
+        )
+        audit.log_event(
+            "matter_query",
+            matter_id=matter_id, task=task, mode=st.mode,
+            exhaustive=True, model=st.model, run_id=st.run_id,
+            batches=st.batches, chunks_processed=result.top_k,
+            prompt_tokens=st.prompt_tokens, completion_tokens=st.completion_tokens,
+            cost_usd=st.cost_usd, seconds=st.seconds,
+            retrieved_file_ids=result.retrieved_file_ids,
+            cancelled=cancelled,
+        )
+
+    runs.start(state, work)
+
+
 def _collect_web_inputs(template, form) -> dict:
     """Pull this task's declared inputs out of the submitted form."""
     inputs: dict = {}
@@ -248,7 +308,7 @@ def _display_inputs(template, structured_inputs: dict) -> dict:
 
 def _render_result(
     result, template, task, structured_inputs, back_url, back_label, matter_name=None,
-    scope_mode="all", scope_names=None, scope_total=0,
+    scope_mode="all", scope_names=None, scope_total=0, run_state=None,
 ):
     """Render result.html. Shared by the ad-hoc and matter query paths; the only
     per-context difference is the back link."""
@@ -286,6 +346,10 @@ def _render_result(
         scope_mode=scope_mode,
         scope_names=scope_names or [],
         scope_total=scope_total,
+        # Session 8: exhaustive provenance. A lawyer relying on this output must
+        # be able to see WHICH model produced it and what it cost, especially
+        # since exhaustive runs override the configured model.
+        run_state=run_state,
         is_compare=is_compare,
         export_token=export_token,
         export_formats=export.list_export_formats(payload),
@@ -437,6 +501,98 @@ def create_app() -> Flask:
             conn.close()
         return redirect(url_for("matter_detail", matter_id=matter_id))
 
+    # ----------------------------------------------------------------------
+    # Exhaustive run pages (Session 8)
+    # ----------------------------------------------------------------------
+    @app.get("/runs/<run_id>")
+    def run_page(run_id: str):
+        state = runs.load(run_id)
+        if state is None:
+            abort(404)
+        if state.status == runs.DONE or (
+            state.status == runs.CANCELLED and runs.load_result(run_id)
+        ):
+            payload = runs.load_result(run_id)
+            if payload:
+                result = pipeline.PipelineResult(**payload)
+                template = get_template(state.task)
+                conn = matters.connect()
+                try:
+                    name = matters.get_matter(conn, state.matter_id).name
+                finally:
+                    conn.close()
+                return _render_result(
+                    result, template, state.task, {},
+                    back_url=url_for("matter_detail", matter_id=state.matter_id),
+                    back_label="Back to matter", matter_name=name,
+                    scope_mode="selected" if state.scope_names else "all",
+                    scope_names=state.scope_names,
+                    scope_total=len(state.scope_names),
+                    run_state=state,
+                )
+        return render_template("run.html", run=state)
+
+    @app.get("/runs/<run_id>/status")
+    def run_status(run_id: str):
+        """Polled every 1.5 s by the run page. Deliberately tiny."""
+        state = runs.load(run_id)
+        if state is None:
+            return {"status": "missing"}, 404
+        return {
+            "status": state.status,
+            "batch": state.batch,
+            "batches": state.batches,
+            "files_total": state.files_total,
+            "current_files": state.current_files,
+            "cost_usd": state.cost_usd,
+            "prompt_tokens": state.prompt_tokens,
+            "completion_tokens": state.completion_tokens,
+            "seconds": state.seconds,
+            "error": state.error,
+            "cancel_requested": state.cancel_requested,
+            "done": state.status in runs.TERMINAL,
+        }
+
+    @app.post("/runs/<run_id>/cancel")
+    def run_cancel(run_id: str):
+        if runs.request_cancel(run_id):
+            flash("Cancelling after the current batch finishes. Any completed "
+                  "batches will still be shown.", "info")
+        return redirect(url_for("run_page", run_id=run_id))
+
+    @app.post("/matters/<int:matter_id>/estimate")
+    def estimate_exhaustive(matter_id: int):
+        """Figures for the pre-run confirmation dialog, for the current selection."""
+        conn = matters.connect()
+        try:
+            queryable = [
+                f for f in matters.list_files(conn, matter_id)
+                if matters.is_queryable(f.ingest_status)
+            ]
+            queryable = matters.sort_files(
+                queryable, maintenance.get_matter_sort(matter_id)
+            )
+            task = request.form.get("task") or DEFAULT_TASK
+            files, mf, err = _resolve_scope(
+                conn, matter_id, task, request.form, queryable
+            )
+            if err:
+                return {"error": err}, 400
+            scope = [mf] if mf is not None else (files or [])
+        finally:
+            conn.close()
+
+        from .vectorstore import connect as vs_connect
+
+        texts, unreadable = exhaustive.gather_all_chunks(vs_connect(), scope)
+        template = get_template(task)
+        system_prompt = build_system_prompt_for(template, request.form)
+        est = exhaustive.estimate_run(texts, system_prompt)
+        est["unreadable"] = unreadable
+        est["cost_low"] = round(est["cost_low"], 2)
+        est["cost_high"] = round(est["cost_high"], 2)
+        return est
+
     @app.post("/matters/<int:matter_id>/sort")
     def set_matter_sort(matter_id: int):
         """Remember this matter's file ordering. A preference, not matter data:
@@ -508,7 +664,7 @@ def create_app() -> Flask:
             # Matter-only tasks (Compare Clauses) never appear on the ad-hoc form.
             tasks=available_tasks(None), selected_task=DEFAULT_TASK,
             values={}, top_k="", reindex=False, limitation_signals=None,
-            action=url_for("ad_hoc_query"),
+            action=url_for("ad_hoc_query"), estimate_url="",
         )
         defaults.update(kw)
         return render_template("ad_hoc.html", **defaults), status
@@ -538,6 +694,7 @@ def create_app() -> Flask:
             selected_task=DEFAULT_TASK,
             values={}, top_k="", limitation_signals=None, limitation_by_file=None,
             selected_file_id=None, selected_file_ids=[], scope_mode="all",
+            estimate_url=url_for("estimate_exhaustive", matter_id=matter_id),
             action=url_for("matter_query", matter_id=matter_id),
         )
         defaults.update(kw)
@@ -787,6 +944,37 @@ def create_app() -> Flask:
                         conn, matter_id, status=400,
                         error=" ".join(pleading_errors), **common
                     )
+
+            # Session 8: exhaustive runs take minutes (measured 169.5 s over a
+            # 9-file matter), so they execute as a background task and the
+            # browser is redirected to a run page. Everything below this is the
+            # unchanged synchronous path for every other mode.
+            from .prompts import is_exhaustive
+
+            if is_exhaustive(structured_inputs) and task in prompts_exhaustive_tasks():
+                scope_files = [mf] if mf is not None else (files or [])
+                existing = runs.active_run_for(matter_id)
+                if existing:
+                    # A second click, or another tab. Show the run in progress
+                    # rather than refusing or starting a duplicate.
+                    flash("An exhaustive analysis is already running for this "
+                          "matter.", "info")
+                    return redirect(url_for("run_page", run_id=existing))
+
+                state = runs.create(
+                    matter_id=matter_id, task=task,
+                    mode=(structured_inputs.get("detail_level")
+                          or structured_inputs.get("mode") or "Exhaustive"),
+                    model=exhaustive.EXHAUSTIVE_MODEL,
+                    scope_names=[f.filename for f in scope_files],
+                )
+                clash = runs.acquire(matter_id, state.run_id)
+                if clash:
+                    return redirect(url_for("run_page", run_id=clash))
+
+                _start_exhaustive(state, scope_files, task, structured_inputs,
+                                  matter_id)
+                return redirect(url_for("run_page", run_id=state.run_id))
 
             try:
                 if mf is not None:

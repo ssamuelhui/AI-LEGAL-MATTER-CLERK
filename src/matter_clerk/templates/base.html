@@ -59,6 +59,17 @@
     .file-choice-name { flex: 0 1 auto; }
     .file-choice-note { font-size: 11px; color: #777; }
     .scope-pane { margin-top: 10px; }
+    .progress-track { height: 8px; background: #dbe6f2; border-radius: 4px;
+                      overflow: hidden; margin: 10px 0 6px; }
+    .progress-fill  { height: 100%; width: 0; background: #1f6feb;
+                      transition: width .4s ease; }
+    .progress-fill.indeterminate { width: 40%; animation: mc-slide 1.6s ease-in-out infinite; }
+    @keyframes mc-slide { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
+    .run-tally { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 12px;
+                 font-size: 12px; color: #555; }
+    .exh-note  { font-size: 12px; color: #6a4a00; background: #fff8e1;
+                 border: 1px solid #f0d488; border-radius: 4px;
+                 padding: 8px 10px; margin-top: 8px; }
     .support-line { margin-top: 40px; padding-top: 12px; border-top: 1px solid #eee; }
     .support-line form { margin: 0; }
     .linklike { background: none; border: 0; padding: 0; color: #667;

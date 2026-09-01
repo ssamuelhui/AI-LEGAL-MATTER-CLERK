@@ -9,6 +9,16 @@ inputs:
     label: Optional focus
     placeholder: "Leave blank for a full summary, or narrow it, e.g. 'focus on the indemnity dispute'."
 
+  - name: mode
+    type: select
+    required: false
+    label: Analysis mode
+    control: true
+    # Session 8. "Standard" is the existing retrieved-top-k behaviour and MUST
+    # stay first so it remains the default. "Exhaustive" reads every passage of
+    # every selected file. Preview: the mode is under evaluation, not the task.
+    options: ["Standard", "Exhaustive (preview)"]
+
 retrieval_query: "parties, nature of the dispute, key documents, principal facts in dispute, current procedural posture"
 top_k: 12
 

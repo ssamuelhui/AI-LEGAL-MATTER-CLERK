@@ -115,6 +115,28 @@
 {# Session 7: the scope the lawyer chose, stated before the answer. Distinct
    from the "Drew on" provenance below, which reports what actually grounded
    the answer -- a file can be in scope and contribute nothing. #}
+{% if run_state %}
+<div class="banner info">
+  <strong>Exhaustive analysis.</strong>
+  Read every passage of {{ run_state.files_total }} file(s) in
+  {{ run_state.batches or 1 }} model call(s), using
+  <code>{{ run_state.model }}</code>.
+  <div class="metadata" style="margin-top:6px;">
+    {{ run_state.prompt_tokens|int }} tokens in &middot;
+    {{ run_state.completion_tokens|int }} tokens out &middot;
+    ${{ '%.2f'|format(run_state.cost_usd) }} &middot;
+    {{ run_state.seconds|int }}s
+  </div>
+  {% if run_state.mode and 'preview' in run_state.mode %}
+  <div style="margin-top:8px;">
+    <strong>Preview mode.</strong> The exhaustive <em>mode</em> for this task is
+    still under evaluation &mdash; the task itself is not. Check this output more
+    carefully than usual.
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if scope_total %}
 <div class="banner info scope-line">
   {% if scope_mode == 'all' %}

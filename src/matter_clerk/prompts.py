@@ -97,6 +97,81 @@ DETAILED_TIMELINE_INSTRUCTION = (
 )
 
 # --------------------------------------------------------------------------
+# Exhaustive mode (Session 8).
+#
+# Same mechanism as DETAILED_TIMELINE_INSTRUCTION: code-owned, appended after
+# the task body, never in YAML where a template author could weaken it.
+#
+# The distinction that matters is stated in the first line of each. In the
+# standard path the passages are a RETRIEVED SELECTION, so a model that skips
+# something may reasonably assume it was not chosen for it. In exhaustive mode
+# the passages are the COMPLETE text, so anything omitted is omitted by the
+# model's own editorial judgement -- which is exactly what the lawyer asked us
+# to stop doing.
+# --------------------------------------------------------------------------
+EXHAUSTIVE_TIMELINE_INSTRUCTION = (
+    "EXHAUSTIVE MODE. The passages below are the COMPLETE text of every "
+    "selected document, not a filtered selection. Extract EVERY dated event "
+    "mentioned anywhere in them.\n"
+    "- Include events that appear minor, administrative, or routine.\n"
+    "- Include dates in email headers, letterheads and signature blocks where "
+    "the passage establishes that something happened on that date.\n"
+    "- Where the same event appears in several passages (an email chain quoting "
+    "earlier messages), emit ONE row and cite every passage containing it.\n"
+    "- Do not filter for importance, materiality or relevance. That judgement "
+    "belongs to the lawyer reading the table, not to you.\n"
+    "- A long table is the expected and correct output. Do not shorten it."
+)
+
+EXHAUSTIVE_SUMMARY_INSTRUCTION = (
+    "EXHAUSTIVE MODE. The passages below are the COMPLETE text of every "
+    "selected document, not a filtered selection. Cover every document.\n"
+    "- Work through the material document by document, under a heading naming "
+    "each one, before any overall synthesis.\n"
+    "- Record every factual assertion, obligation, date, amount and position "
+    "taken, including ones that look peripheral.\n"
+    "- Do not compress detail into generalities. A sentence such as 'the "
+    "parties exchanged correspondence about repairs' is a failure; the "
+    "individual exchanges, with their dates and content, are the answer.\n"
+    "- Length is not a fault here. Omission is."
+)
+
+EXHAUSTIVE_ENTITIES_INSTRUCTION = (
+    "EXHAUSTIVE MODE. The passages below are the COMPLETE text of every "
+    "selected document, not a filtered selection. List every entity that "
+    "appears in them.\n"
+    "- Include entities mentioned once, in passing, or only in an email header, "
+    "signature block or copy line.\n"
+    "- Where the same entity appears in several documents, give ONE entry and "
+    "cite every passage naming it.\n"
+    "- Do not filter for prominence or apparent relevance to the dispute.\n"
+    "- Where a name is ambiguous or partially given, reproduce it as written "
+    "rather than resolving or discarding it."
+)
+
+EXHAUSTIVE_TASKS = ("timeline", "summarize", "find_entities")
+
+
+def is_exhaustive(structured_inputs: dict | None) -> bool:
+    """True when the run was asked for in exhaustive mode.
+
+    Timeline reuses its existing `detail_level` select (Concise / Detailed /
+    Exhaustive); Summarize and Find Entities use a `mode` select (Standard /
+    Exhaustive). One predicate, so the routing, the prompt and the audit record
+    can never disagree about which mode a run was in.
+    """
+    si = structured_inputs or {}
+    # startswith, not equality: Summarize and Find Entities label their option
+    # "Exhaustive (preview)" so the preview status is visible at the point of
+    # choosing. The label may change; the mode it selects must not.
+    return any(
+        str(si.get(k) or "").startswith("Exhaustive")
+        for k in ("detail_level", "mode")
+    )
+
+
+
+# --------------------------------------------------------------------------
 # Authority mode (Phase 2b) -- Draft Memo and Draft Pleading only.
 #
 # Matter-only mode forbids the model from invoking any external legal authority,
@@ -808,6 +883,16 @@ def build_system_prompt(
     si = structured_inputs or {}
     if (si.get("detail_level") or "Concise") == "Detailed":
         parts.append(DETAILED_TIMELINE_INSTRUCTION)
+
+    # Session 8. Keyed off the task id so a stray control value on another
+    # task can never alter its prompt.
+    if is_exhaustive(si):
+        if template.id == "timeline":
+            parts.append(EXHAUSTIVE_TIMELINE_INSTRUCTION)
+        elif template.id == "summarize":
+            parts.append(EXHAUSTIVE_SUMMARY_INSTRUCTION)
+        elif template.id == "find_entities":
+            parts.append(EXHAUSTIVE_ENTITIES_INSTRUCTION)
     return "\n\n".join(parts)
 
 

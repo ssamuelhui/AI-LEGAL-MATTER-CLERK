@@ -25,6 +25,16 @@ inputs:
     label: Optional focus
     placeholder: "Leave blank to extract everything, or narrow it, e.g. 'only entities tied to the purchase agreement'."
 
+  - name: mode
+    type: select
+    required: false
+    label: Analysis mode
+    control: true
+    # Session 8. "Standard" is the existing retrieved-top-k behaviour and MUST
+    # stay first so it remains the default. "Exhaustive" reads every passage of
+    # every selected file. Preview: the mode is under evaluation, not the task.
+    options: ["Standard", "Exhaustive (preview)"]
+
 retrieval_query: "party names, people, dates, dollar amounts, monetary figures, addresses, locations, organizations, companies, corporations"
 top_k: 16
 

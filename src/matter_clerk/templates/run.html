@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block subtitle %} &mdash; Exhaustive analysis{% endblock %}
+{% block content %}
+
+<nav><a href="{{ url_for('matter_detail', matter_id=run.matter_id) }}">&larr; Back to matter</a></nav>
+
+<section class="block">
+  <h2>Exhaustive analysis</h2>
+
+  <div class="metadata">
+    task: {{ run.task }} &middot; mode: {{ run.mode }} &middot; model: {{ run.model }}
+  </div>
+
+  {% if run.status in ('queued', 'running') %}
+  <div class="banner info" id="progress-banner">
+    <strong id="progress-headline">Starting&hellip;</strong>
+    <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+    <div id="progress-detail" class="metadata"></div>
+    <div class="hint" style="margin-top:8px;">
+      This reads every passage of {{ run.files_total }} file(s) and typically
+      takes a few minutes. You can close this tab and come back to it &mdash;
+      the analysis keeps running.
+    </div>
+  </div>
+
+  <div class="run-tally" id="tally">
+    <span class="tally-item">Spent so far: <strong id="tally-cost">$0.00</strong></span>
+    <span class="tally-item">Tokens in: <strong id="tally-in">0</strong></span>
+    <span class="tally-item">Tokens out: <strong id="tally-out">0</strong></span>
+    <span class="tally-item">Elapsed: <strong id="tally-secs">0s</strong></span>
+  </div>
+
+  <form method="post" action="{{ url_for('run_cancel', run_id=run.run_id) }}"
+        style="margin-top:14px;"
+        onsubmit="return confirm('Stop after the current batch? Any batches already finished will still be shown.');">
+    <button type="submit" class="btn-small" id="cancelbtn"
+            {% if run.cancel_requested %}disabled{% endif %}>
+      {% if run.cancel_requested %}Cancelling&hellip;{% else %}Cancel this analysis{% endif %}
+    </button>
+  </form>
+
+  {% elif run.status == 'failed' %}
+  <div class="banner error">
+    <strong>This analysis did not finish.</strong>
+    <div style="margin-top:6px;">{{ run.error }}</div>
+    <div style="margin-top:8px;">Nothing in your matter was changed. You can run it again.</div>
+  </div>
+
+  {% elif run.status == 'interrupted' %}
+  <div class="banner warn">
+    <strong>This analysis was interrupted.</strong>
+    <div style="margin-top:6px;">{{ run.error }}</div>
+  </div>
+
+  {% elif run.status == 'cancelled' %}
+  <div class="banner warn">
+    <strong>Cancelled.</strong> No results were produced before it stopped.
+  </div>
+  {% endif %}
+
+  {% if run.scope_names %}
+  <div class="metadata" style="margin-top:16px;">
+    Files in this run ({{ run.scope_names|length }}):
+    {{ run.scope_names|join(', ') }}
+  </div>
+  {% endif %}
+</section>
+
+{% if run.status in ('queued', 'running') %}
+<script>
+  (function () {
+    // Polling rather than server-sent events: the state lives in a file, so a
+    // poll is also what makes the page survive a closed tab or a restarted
+    // server. 1.5 s is frequent enough to feel live and cheap enough to ignore.
+    var POLL_MS = 1500;
+    var url = "{{ url_for('run_status', run_id=run.run_id) }}";
+
+    function fmtSecs(s) {
+      s = Math.round(s || 0);
+      return s < 60 ? s + "s" : Math.floor(s / 60) + "m " + (s % 60) + "s";
+    }
+
+    function tick() {
+      fetch(url, {cache: "no-store"})
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d.done) { window.location.reload(); return; }
+
+          var head = document.getElementById("progress-headline");
+          var fill = document.getElementById("progress-fill");
+          var det = document.getElementById("progress-detail");
+
+          if (d.batches > 1) {
+            head.textContent = "Analysing batch " + d.batch + " of " + d.batches;
+            fill.style.width = Math.round((d.batch - 1) / d.batches * 100) + "%";
+          } else {
+            head.textContent = "Reading every passage of " + d.files_total + " file(s)";
+            // One batch: no meaningful fraction to report, so the bar animates
+            // rather than pretending to know how far along it is.
+            fill.classList.add("indeterminate");
+          }
+          det.textContent = (d.current_files || []).join(", ");
+
+          document.getElementById("tally-cost").textContent =
+            "$" + (d.cost_usd || 0).toFixed(2);
+          document.getElementById("tally-in").textContent =
+            (d.prompt_tokens || 0).toLocaleString();
+          document.getElementById("tally-out").textContent =
+            (d.completion_tokens || 0).toLocaleString();
+          document.getElementById("tally-secs").textContent = fmtSecs(d.seconds);
+
+          if (d.cancel_requested) {
+            var b = document.getElementById("cancelbtn");
+            if (b) { b.disabled = true; b.textContent = "Cancelling…"; }
+          }
+          setTimeout(tick, POLL_MS);
+        })
+        .catch(function () { setTimeout(tick, POLL_MS * 3); });
+    }
+    setTimeout(tick, 400);
+  })();
+</script>
+{% endif %}
+
+{% endblock %}

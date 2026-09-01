@@ -6,4 +6,4 @@
 # LAYOUT version (paths.DATA_DIR_VERSION) and moves independently -- it says
 # how the folder is arranged, not which release wrote it. matter_clerk.spec,
 # installer/matter_clerk.iss and updater.py all read this value.
-__version__ = "1.0.2"
+__version__ = "1.0.3"

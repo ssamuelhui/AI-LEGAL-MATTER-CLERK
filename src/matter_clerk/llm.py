@@ -44,6 +44,29 @@ class LLMClient:
         self.model = model or os.environ.get("MODEL", "xiaomi/mimo-v2.5-pro")
         self._client = OpenAI(api_key=self.api_key, base_url=base_url)
 
+    def complete_with_usage(self, messages: list[dict]) -> tuple[str, dict]:
+        """Like complete(), but also returns the provider's token accounting.
+
+        Added in Session 8 for exhaustive mode, which shows a running cost while
+        it works. The usage dict is whatever the provider reported -- never
+        estimated here, because a made-up number on a cost display is worse than
+        no number.
+        """
+        response = self._client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=0.1,
+        )
+        usage = {}
+        u = getattr(response, "usage", None)
+        if u is not None:
+            usage = {
+                "prompt_tokens": getattr(u, "prompt_tokens", None),
+                "completion_tokens": getattr(u, "completion_tokens", None),
+                "total_tokens": getattr(u, "total_tokens", None),
+            }
+        return (response.choices[0].message.content or ""), usage
+
     def complete(self, messages: list[dict]) -> str:
         # Deliberately no max_tokens. The default provider (MiMo Pro) is a
         # reasoning model whose hidden reasoning tokens are charged against

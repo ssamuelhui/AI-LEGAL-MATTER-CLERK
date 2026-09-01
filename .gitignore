@@ -74,3 +74,6 @@ installer/output/
 /notices.json
 /migrations/
 matter-clerk-diagnostic-*.json
+
+# Session 8 background run state (data directory = repo root in a checkout).
+/runs/
