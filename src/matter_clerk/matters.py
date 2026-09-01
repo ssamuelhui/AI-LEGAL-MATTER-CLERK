@@ -433,3 +433,137 @@ def _file_from_row(row: sqlite3.Row) -> MatterFile:
         ingested_at=row["ingested_at"],
         created_at=row["created_at"],
     )
+
+
+# --------------------------------------------------------------------------
+# Date-prefix parsing and file ordering (Session 7)
+#
+# Lawyers name matter documents by date. The real conventions in the pilot
+# matter, which these rules are calibrated against rather than guessed from:
+#
+#   2026-03-27 - Technician Report Form.pdf
+#   2026-01-21 - 2026-03-26 - Condo manage email re inspection.pdf
+#   2024-04-01 to 2026-04-30 - email exchange re. Heat pump.pdf
+#   Condo Bylaw 6.pdf                     (undated -> alphabetical)
+#
+# Note the third and second forms: a date RANGE, written either with "to" or
+# with a hyphen -- and in the hyphen case the same " - " separator divides the
+# two dates AND the date block from the description. Sorting is by the START
+# date, so the range never needs to be disentangled to sort correctly; it is
+# recognised anyway so the parsed value is honest and a future date column has
+# real data to show.
+#
+# What deliberately does NOT parse:
+#   3-15-24_x.pdf     US order. Read as YY-MM-DD it is month 15 -> rejected.
+#                     US order is never attempted: 03-04-05 is valid in three
+#                     different orderings, and silently guessing wrong in a
+#                     legal chronology is worse than not sorting at all.
+#   letter_24-03-15   Not a prefix. A mid-name number is as likely to be a
+#                     court file number, a docket, or an amount.
+#   23_march_x.pdf    Word months: is 23 a day or a year?
+# --------------------------------------------------------------------------
+import re as _re
+
+# YYYY-MM-DD or YY-MM-DD, separated by - _ or . (the last is a common Windows
+# convention). Anchored at the start: this is a date PREFIX parser.
+_DATE_RE = _re.compile(
+    r"^(?P<y>\d{4}|\d{2})[-_.](?P<m>\d{1,2})[-_.](?P<d>\d{1,2})(?P<rest>.*)$"
+)
+
+# What may follow a date for it to count as a prefix rather than a coincidence:
+# whitespace, a separator, or the end of the name.
+_BOUNDARY = _re.compile(r"^([\s\-_.]|$)")
+
+# " to " / " - " / "_to_" between two dates.
+_RANGE_JOIN = _re.compile(r"^\s*(to|-|until|through)\s*", _re.IGNORECASE)
+
+# Two-digit years pivot at 70, the usual POSIX convention: 00-69 -> 2000s,
+# 70-99 -> 1900s. A matter may well reference a 1998 document.
+_YEAR_PIVOT = 70
+
+
+def _to_date(y: str, m: str, d: str):
+    """Build a date, or None if the components are not a real calendar date."""
+    import datetime as _dt
+
+    year = int(y)
+    if len(y) == 2:
+        year += 2000 if year < _YEAR_PIVOT else 1900
+    try:
+        return _dt.date(year, int(m), int(d))
+    except ValueError:
+        return None          # 24-02-30, 24-13-01, and every other fake date
+
+
+def parse_date_prefix(filename: str):
+    """Parse a leading date (or date range) from a filename.
+
+    Returns (start_date, end_date) where end_date is None for a single date,
+    or None when the filename carries no usable date prefix.
+    """
+    if not filename:
+        return None
+
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+
+    m = _DATE_RE.match(stem)
+    if not m:
+        return None
+    start = _to_date(m.group("y"), m.group("m"), m.group("d"))
+    if start is None:
+        return None
+
+    rest = m.group("rest")
+    if not _BOUNDARY.match(rest):
+        # e.g. "2024-03-15x" -- a date-looking run inside a longer token.
+        return None
+
+    # Optional second date, making this a range. The sort key is the start
+    # either way, so failing to spot the range costs nothing but accuracy.
+    join = _RANGE_JOIN.match(rest)
+    if join:
+        m2 = _DATE_RE.match(rest[join.end():])
+        if m2:
+            end = _to_date(m2.group("y"), m2.group("m"), m2.group("d"))
+            if end is not None and _BOUNDARY.match(m2.group("rest")):
+                return (start, end)
+    return (start, None)
+
+
+SORT_ORDERS = ("oldest", "newest", "upload")
+DEFAULT_SORT = "oldest"
+
+SORT_LABELS = {
+    "oldest": "Oldest first",
+    "newest": "Newest first",
+    "upload": "Upload order",
+}
+
+
+def sort_files(files: list[MatterFile], order: str = DEFAULT_SORT) -> list[MatterFile]:
+    """Order a matter's files for display and for selection.
+
+    Dated files sort by their parsed date; undated files sort alphabetically
+    by filename. Dated files come first as a group, because a chronology with
+    undated material interleaved by name would read as though the names were
+    dates. Reversing to "newest first" reverses the dated group only -- the
+    alphabetical tail stays A-Z, since reverse-alphabetical is not a thing a
+    lawyer asked for and reads as a bug.
+    """
+    if order not in SORT_ORDERS:
+        order = DEFAULT_SORT
+    if order == "upload":
+        return list(files)          # the SQL order: created_at, id
+
+    dated: list[tuple] = []
+    undated: list[tuple] = []
+    for f in files:
+        parsed = parse_date_prefix(f.filename)
+        if parsed is None:
+            undated.append(((f.filename or "").lower(), f.id, f))
+        else:
+            dated.append((parsed[0], (f.filename or "").lower(), f.id, f))
+
+    dated.sort(key=lambda t: (t[0], t[1], t[2]), reverse=(order == "newest"))
+    undated.sort(key=lambda t: (t[0], t[1]))
+    return [t[-1] for t in dated] + [t[-1] for t in undated]

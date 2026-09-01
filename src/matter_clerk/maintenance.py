@@ -336,10 +336,92 @@ def build_diagnostic_report() -> dict:
     return report
 
 
+SUPPORT_README = """Matter Clerk support report
+================================
+
+WHAT THIS IS
+    The file named matter-clerk-diagnostic-<date>-<time>.json beside this
+    README describes the structure of your Matter Clerk installation. It was
+    created when you clicked "Generate support report".
+
+WHAT TO DO
+    Email the .json file to your Matter Clerk contact, along with a sentence
+    about what you were doing when the problem happened. That sentence is
+    genuinely useful -- the report says what the state IS, not what you were
+    trying to do.
+
+WHAT IT CONTAINS
+    - The version of Matter Clerk you are running
+    - How many matters you have, and how many files in each
+    - Each file's status, and whether its search index is healthy
+    - Whether the database and search index open correctly
+
+WHAT IT DOES NOT CONTAIN
+    - Any text from any document
+    - Any file name, matter name, or client name
+    - Any API key or password
+
+    File names appear only as their type (".pdf") and their length. The report
+    is designed so that you do not have to read it before sending it.
+
+    You may open it in Notepad if you would like to check.
+"""
+
+
 def write_diagnostic_report() -> Path:
-    """Write the report to the data directory and return its path."""
+    """Write the report, plus a plain-English README beside it.
+
+    The README exists because the report on its own leaves a non-technical user
+    holding a JSON file with no idea whether it is safe to send or who to send
+    it to -- which is how a support tool ends up never being used.
+    """
     report = build_diagnostic_report()
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     path = data_dir() / f"matter-clerk-diagnostic-{stamp}.json"
     path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    try:
+        (path.parent / "READ ME - what to do with the support report.txt").write_text(
+            SUPPORT_README, encoding="utf-8"
+        )
+    except Exception as e:                                        # noqa: BLE001
+        log.warning(f"could not write support README: {e}")
     return path
+
+
+# --------------------------------------------------------------------------
+# UI preferences (Session 7)
+#
+# Per-matter file sort order. A JSON file in the data directory rather than a
+# `matters` column: this is a display preference, not matter data, and it is
+# not worth a schema change plus a migration on every installed copy. It is
+# also disposable -- losing it costs the user one dropdown click.
+# --------------------------------------------------------------------------
+def _prefs_path() -> Path:
+    return data_dir() / "ui_prefs.json"
+
+
+def _load_prefs() -> dict:
+    try:
+        p = _prefs_path()
+        if p.is_file():
+            return json.loads(p.read_text(encoding="utf-8")) or {}
+    except Exception:                                             # noqa: BLE001
+        pass
+    return {}
+
+
+def get_matter_sort(matter_id: int, default: str = "oldest") -> str:
+    return str(_load_prefs().get("matter_sort", {}).get(str(matter_id), default))
+
+
+def set_matter_sort(matter_id: int, order: str) -> None:
+    """Remember a matter's sort order. Never raises -- a preference that fails
+    to save is a dropdown the user clicks again, not an error worth showing."""
+    try:
+        prefs = _load_prefs()
+        prefs.setdefault("matter_sort", {})[str(matter_id)] = order
+        p = _prefs_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
+    except Exception as e:                                        # noqa: BLE001
+        log.warning(f"could not save sort preference: {e}")

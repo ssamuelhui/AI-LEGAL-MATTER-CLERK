@@ -500,3 +500,54 @@ It cannot block startup. If the store will not open the manifest is left
 untouched and the marker is not written, so it retries next launch — demoting
 every file in every matter because Chroma was briefly unavailable would be far
 worse than the problem. To force a re-run, delete the marker file.
+
+---
+
+## 17. File scope and ordering (v1.0.2)
+
+### Scope selector
+
+Every matter-mode task renders the same control from
+`src/matter_clerk/templates/_file_selector.html`, with three modes:
+
+| Mode | Behaviour |
+|---|---|
+| `all` | Every queryable file. The default, and identical to pre-v1.0.2 behaviour |
+| `selected` | Only the ticked files. An empty tick-list means all files |
+| `single` | One file, via `run_query` on a pinned collection |
+
+Scope resolution lives in `web._resolve_scope`, which authorizes every
+submitted id against the matter before anything runs. `run_matter_query` takes
+no id parameter — it already accepts a file list, so scoping is passing a
+shorter one.
+
+`compare_clauses` and `suggest_cases` keep single-file mode hidden: restricting
+a cross-document comparison, or matter-wide case discovery, to one file is a
+contradiction. Both still support subset selection. Enforcement is server-side
+(`web.WHOLE_MATTER_TASKS`); the JS only hides the option.
+
+Unqueryable files appear greyed out with a reason rather than being hidden.
+`ocr_low_quality` files remain selectable — they are searchable, just flagged.
+
+The result page reports scope above the answer, separately from the "Drew on"
+provenance line: scope is what was chosen, provenance is what contributed.
+
+### Ordering
+
+`matters.parse_date_prefix()` and `matters.sort_files()`. Accepted prefixes:
+
+```
+2026-03-27 - name.pdf                      single date
+2026-01-21 - 2026-03-26 - name.pdf         range, hyphen-joined
+2024-04-01 to 2026-04-30 - name.pdf        range, "to"-joined
+2024-03-15_name.pdf   24-03-15_name.pdf    YYYY / YY, - _ or . separators
+```
+
+Ranges sort by start date. Undated files sort alphabetically after dated ones.
+Ambiguous or non-prefix dates deliberately do not parse — see the ARCHITECTURE
+entry for why guessing is worse than not sorting.
+
+Order is chosen per matter from the **Sort** control and stored in
+`<data_dir>/ui_prefs.json` (not the database — no schema change, no migration).
+The same order drives the file list, the scope selector, and Compare Clauses'
+column order.

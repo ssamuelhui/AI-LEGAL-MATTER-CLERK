@@ -22,7 +22,21 @@ last queried: {{ matter.last_queried_at or "never" }}</div>
 {% if error %}<div class="banner error">{{ error }}</div>{% endif %}
 
 <section class="block">
-  <h2>Files</h2>
+  <div class="files-head">
+    <h2>Files</h2>
+    {% if files|length > 1 %}
+    <form method="post" action="{{ url_for('set_matter_sort', matter_id=matter.id) }}"
+          class="sort-form">
+      <label for="sortsel" class="sort-label">Sort</label>
+      <select id="sortsel" name="sort" onchange="this.form.submit()">
+        {% for o in sort_orders %}
+        <option value="{{ o }}" {% if o == sort_order %}selected{% endif %}>{{ sort_labels[o] }}</option>
+        {% endfor %}
+      </select>
+      <noscript><button type="submit" class="btn-small">Apply</button></noscript>
+    </form>
+    {% endif %}
+  </div>
   {% if files %}
   <table class="file-table">
     <thead><tr><th>File</th><th>Type</th><th>Status</th><th>Ingested</th><th></th></tr></thead>

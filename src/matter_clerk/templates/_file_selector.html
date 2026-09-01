@@ -1,0 +1,93 @@
+{# Shared file-scope selector (Session 7).                                     #}
+{#                                                                             #}
+{# One control, three modes, used by EVERY matter-mode task. It replaces the   #}
+{# two overlapping controls that existed before: the "Restrict to a specific   #}
+{# file" dropdown (all tasks) and the Compare Clauses checkbox list. Having    #}
+{# both meant a lawyer could submit a single file AND a checkbox subset, and   #}
+{# the server resolved that by silently ignoring the checkboxes -- exactly the #}
+{# kind of quiet drop this codebase refuses everywhere else.                   #}
+{#                                                                             #}
+{# Radio rather than a select, for the same reason authority_mode is a radio:  #}
+{# the lawyer should be able to SEE that scoping exists, and that "all files"  #}
+{# is the default, before deciding.                                            #}
+{#                                                                             #}
+{# Caller supplies: selector_files (already sorted), scope_mode,               #}
+{# selected_file_id, selected_file_ids, compare_max_files.                     #}
+
+<div class="field file-scope" data-total="{{ selector_files|selectattr('queryable')|list|length }}"
+     data-max="{{ compare_max_files }}">
+  {# Suggest Relevant Cases does not read the selected files the way the other
+     tasks do -- it derives search concepts from them and queries CanLII. The
+     label says so rather than letting the shared control imply otherwise. #}
+  <label class="scope-label"
+         data-default="Which files should this task use?"
+         data-suggest-cases="Files whose concepts guide CanLII search">Which
+    files should this task use?</label>
+
+  <div class="radio-set">
+    <label class="inline radio-opt">
+      <input type="radio" name="scope_mode" value="all"
+             {% if scope_mode != 'selected' and scope_mode != 'single' %}checked{% endif %}>
+      All files in this matter
+      ({{ selector_files|selectattr('queryable')|list|length }})
+    </label>
+    <label class="inline radio-opt">
+      <input type="radio" name="scope_mode" value="selected"
+             {% if scope_mode == 'selected' %}checked{% endif %}>
+      Selected files
+    </label>
+    <label class="inline radio-opt scope-single-opt">
+      <input type="radio" name="scope_mode" value="single"
+             {% if scope_mode == 'single' %}checked{% endif %}>
+      A single file
+    </label>
+  </div>
+
+  {# ---- mode: selected ---- #}
+  <div class="scope-pane scope-selected" {% if scope_mode != 'selected' %}hidden{% endif %}>
+    <div class="hint">
+      Tick the files this task should read. Leaving every box unticked is the
+      same as choosing all files.
+    </div>
+    <div class="checkboxes file-choices">
+      {% for f in selector_files %}
+      <label class="inline file-choice {% if not f.queryable %}is-disabled{% endif %}">
+        <input type="checkbox" name="file_ids" value="{{ f.id }}"
+               {% if not f.queryable %}disabled{% endif %}
+               {% if f.id|string in selected_file_ids %}checked{% endif %}>
+        <span class="file-choice-name">{{ f.filename }}</span>
+        {% if f.status_badge %}
+        <span class="badge {{ f.badge_class }}">{{ f.status_badge }}</span>
+        {% endif %}
+        {% if f.status_note %}<span class="file-choice-note">{{ f.status_note }}</span>{% endif %}
+      </label>
+      {% endfor %}
+    </div>
+    <div class="scope-msg banner warn" hidden></div>
+  </div>
+
+  {# ---- mode: single ---- #}
+  <div class="scope-pane scope-single" {% if scope_mode != 'single' %}hidden{% endif %}>
+    <label for="file_id">File to use</label>
+    <select id="file_id" name="file_id">
+      <option value="">&mdash; choose a file &mdash;</option>
+      {% for f in selector_files %}
+      {% if f.queryable %}
+      <option value="{{ f.id }}"
+        {% if selected_file_id and f.id|string == selected_file_id|string %}selected{% endif %}>
+        {{ f.filename }}{% if f.status_badge %} — {{ f.status_badge }}{% endif %}
+      </option>
+      {% endif %}
+      {% endfor %}
+    </select>
+    <div class="hint scope-single-note" hidden></div>
+  </div>
+
+  {% if selector_files|rejectattr('queryable')|list %}
+  <div class="hint">
+    {{ selector_files|rejectattr('queryable')|list|length }} file(s) cannot be
+    searched and are shown greyed out. Use <em>Re-process</em> in the file list
+    above to try them again.
+  </div>
+  {% endif %}
+</div>

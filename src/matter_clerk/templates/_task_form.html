@@ -40,24 +40,10 @@
       {% if matter_files is not defined %}enctype="multipart/form-data"{% endif %}
       id="askform">
   {% if matter_files is defined %}
-  {# Day 4b: the default is to query the WHOLE matter (no file_id submitted).   #}
-  {# The picker is optional and collapsed; it reopens on a refusal re-render if  #}
-  {# the user had previously restricted to a file (selected_file_id set).        #}
-  {# Hidden by JS when Compare Clauses is selected: restricting to ONE file      #}
-  {# contradicts a task that compares across documents. Server-side guarded too. #}
-  <details id="restrict-file" {% if selected_file_id %}open{% endif %}>
-    <summary>Restrict to a specific file (optional)</summary>
-    <label for="file_id">File to query</label>
-    <select id="file_id" name="file_id">
-      <option value="">&mdash; All files in this matter &mdash;</option>
-      {% for f in matter_files %}
-      <option value="{{ f.id }}"
-        {% if selected_file_id and f.id|string == selected_file_id|string %}selected{% endif %}>
-        {{ f.filename }} ({{ f.file_type }})
-      </option>
-      {% endfor %}
-    </select>
-  </details>
+  {# Session 7: one three-mode scope control for EVERY task, replacing the
+     old "Restrict to a specific file" dropdown and the Compare-Clauses-only
+     checkbox list. See _file_selector.html for why they were merged. #}
+  {% include "_file_selector.html" %}
   {% else %}
   <label for="pdf">PDF or email (.eml)</label>
   <input id="pdf" name="pdf" type="file"
@@ -104,29 +90,9 @@
                  {% if is_active and values.get(f.name) %}checked{% endif %}>
           {{ f.label }}
         </label>
-      {% elif f.type == "file_multiselect" %}
-        {# Options are RUNTIME data (this matter's ingested files), not YAML      #}
-        {# `options`. Matter mode only — no file list exists on the ad-hoc form.  #}
-        {# Collapsed by default, matching "Restrict to a specific file"; reopens  #}
-        {# on a re-render if the user had made a selection. No "select all":      #}
-        {# leaving every box unchecked already means all files.                   #}
-        {% if matter_files is defined %}
-        <details class="file-subset" {% if is_active and values.get(f.name) %}open{% endif %}>
-          <summary>{{ f.label }}</summary>
-          <div class="hint">Leave every box unchecked to compare all
-            {{ matter_files|length }} files in this matter.</div>
-          <div class="checkboxes">
-            {% for mf in matter_files %}
-            <label class="inline">
-              <input type="checkbox" name="{{ f.name }}" value="{{ mf.id }}"
-                     {% if is_active and values.get(f.name)
-                           and mf.id|string in values.get(f.name) %}checked{% endif %}>
-              {{ mf.filename }} ({{ mf.file_type }})
-            </label>
-            {% endfor %}
-          </div>
-        </details>
-        {% endif %}
+      {# file_multiselect is no longer rendered here: Session 7 moved file
+         scoping out of per-task YAML inputs and into the shared
+         _file_selector.html control, which every matter-mode task gets. #}
       {% else %}
         <label for="{{ t.id }}_{{ f.name }}">{{ f.label }}</label>
         {% if f.type == "textarea" %}
@@ -265,37 +231,82 @@
     // matter itself is within the cap. Blocking submit here is a convenience —
     // the server re-checks every one of these conditions.
     var submitBtn = document.getElementById("askbtn");
-    var restrictFile = document.getElementById("restrict-file");
 
-    function updateCompareGate(group) {
-      var gate = group.querySelector(".compare-gate");
-      if (!gate) return true;
-      var total = parseInt(gate.dataset.total, 10);
-      var max = parseInt(gate.dataset.max, 10);
-      var boxes = group.querySelectorAll("input[name='file_ids']");
-      var picked = 0;
-      boxes.forEach(function (b) { if (b.checked) picked++; });
+    // Session 7: the file-scope control is shared by every task, so the gate
+    // reads it rather than a per-task fragment. Compare Clauses is the only
+    // task with a file-count rule; the server re-checks every condition here
+    // (pipeline.COMPARE_MAX_FILES), so this is a convenience, not enforcement.
+    var scope = document.querySelector(".file-scope");
 
+    function scopeMode() {
+      var on = document.querySelector("input[name='scope_mode']:checked");
+      return on ? on.value : "all";
+    }
+
+    function updateCompareGate(chosen) {
+      if (!scope) return true;
+      var msgEl = scope.querySelector(".scope-msg");
+      if (!msgEl) return true;
       var msg = "";
-      if (picked === 0 && total > max) {
-        msg = "Select at most " + max + " files to compare (this matter has " +
-              total + ").";
-      } else if (picked === 1) {
-        msg = "Select at least 2 files to compare, or leave every box unchecked " +
-              "to compare all files.";
-      } else if (picked > max) {
-        msg = "Selected " + picked + " files; Compare Clauses is limited to " +
-              max + ".";
+
+      if (chosen === "compare_clauses") {
+        var total = parseInt(scope.dataset.total, 10);
+        var max = parseInt(scope.dataset.max, 10);
+        var picked = 0;
+        scope.querySelectorAll("input[name='file_ids']").forEach(function (b) {
+          if (b.checked && !b.disabled) picked++;
+        });
+        var mode = scopeMode();
+        if (mode !== "selected" && total > max) {
+          msg = "This matter has " + total + " files; Compare Clauses is " +
+                "limited to " + max + ". Choose “Selected files” and " +
+                "pick at most " + max + ".";
+        } else if (mode === "selected" && picked === 1) {
+          msg = "Select at least 2 files to compare.";
+        } else if (mode === "selected" && picked > max) {
+          msg = "Selected " + picked + " files; Compare Clauses is limited to " +
+                max + ".";
+        }
       }
-      var el = gate.querySelector(".compare-gate-msg");
-      el.textContent = msg;
-      el.hidden = !msg;
+      msgEl.textContent = msg;
+      msgEl.hidden = !msg;
       return !msg;
+    }
+
+    // Show the pane belonging to the chosen mode, and disable the controls in
+    // the others so a hidden field can never be submitted.
+    function updateScopePanes(chosen) {
+      if (!scope) return;
+      var mode = scopeMode();
+      var wholeMatter = chosen === "compare_clauses" || chosen === "suggest_cases";
+
+      // Single-file mode is a contradiction for whole-matter tasks. Hide the
+      // option, and fall back to "all" if it was the current choice.
+      var lbl = scope.querySelector(".scope-label");
+      if (lbl) {
+        lbl.textContent = (chosen === "suggest_cases" && lbl.dataset.suggestCases)
+          ? lbl.dataset.suggestCases : lbl.dataset.default;
+      }
+
+      var singleOpt = scope.querySelector(".scope-single-opt");
+      if (singleOpt) singleOpt.hidden = wholeMatter;
+      if (wholeMatter && mode === "single") {
+        var allRadio = scope.querySelector("input[name='scope_mode'][value='all']");
+        if (allRadio) { allRadio.checked = true; mode = "all"; }
+      }
+
+      scope.querySelectorAll(".scope-pane").forEach(function (pane) {
+        var wanted = pane.classList.contains("scope-" + mode);
+        pane.hidden = !wanted;
+        pane.querySelectorAll("input, select").forEach(function (el) {
+          if (el.dataset.permanentlyDisabled === "1") return;
+          el.disabled = !wanted;
+        });
+      });
     }
 
     function update() {
       var chosen = taskSelect.value;
-      var ok = true;
       groups.forEach(function (g) {
         var active = g.getAttribute("data-task") === chosen;
         g.hidden = !active;
@@ -303,23 +314,10 @@
         if (active) {
           updateConditionals(g);
           updateAuthorityHint(g);
-          ok = updateCompareGate(g);
         }
       });
-      // Some tasks are inherently whole-matter: comparing across documents, and
-      // discovering cases from the matter's overall legal shape. Restricting
-      // either to one file is a contradiction, so hide + disable the picker so
-      // it cannot submit a file_id. Both are re-checked server-side.
-      if (restrictFile) {
-        var wholeMatter = chosen === "compare_clauses" ||
-                          chosen === "suggest_cases";
-        restrictFile.hidden = wholeMatter;
-        var sel = restrictFile.querySelector("select");
-        if (sel) {
-          if (wholeMatter) sel.value = "";
-          sel.disabled = wholeMatter;
-        }
-      }
+      updateScopePanes(chosen);
+      var ok = updateCompareGate(chosen);
       if (submitBtn) submitBtn.disabled = !ok;
     }
 
@@ -333,6 +331,10 @@
     }
 
     taskSelect.addEventListener("change", update);
+    if (scope) {
+      scope.querySelectorAll("input[name='scope_mode'], input[name='file_ids']")
+        .forEach(function (el) { el.addEventListener("change", update); });
+    }
     groups.forEach(function (g) {
       g.querySelectorAll("input[name='authority_mode']").forEach(function (r) {
         r.addEventListener("change", function () { updateAuthorityHint(g); });
@@ -340,9 +342,7 @@
       g.querySelectorAll("select").forEach(function (s) {
         s.addEventListener("change", function () { updateConditionals(g); });
       });
-      g.querySelectorAll("input[name='file_ids']").forEach(function (b) {
-        b.addEventListener("change", update);
-      });
+
     });
     update();
 

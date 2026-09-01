@@ -634,3 +634,80 @@ The acknowledged risk: a bug in the updater is the hardest kind to fix remotely,
 ## 2026-08-31: No lawyer sees a raw traceback page
 **Context:** The field report arrived as a screenshot of Flask's "Internal Server Error". Whatever else fails, that page should not be what a legal professional meets mid-matter.
 **Decision:** An app-wide error handler renders an explanatory page with next steps and a diagnostic button, and writes the full traceback to the audit log with matter id, task and path. `HTTPException` passes through untouched so 404s keep their meaning.
+
+## 2026-08-31: File scoping is one control, not two (Session 7)
+**Context:** The lawyer asked for Compare Clauses' file picker on every task. Investigating found the brief's premise was half wrong in a useful way: `_task_form.html` is already a single generic form driven by each task's YAML `inputs`, `file_multiselect` is already a generic input type, and single-file restriction (`file_id`) already worked on every matter-mode task. Compare Clauses had no bespoke template code at all. What was genuinely missing was multi-file *subset* selection, gated behind one line: `if task == pipeline.COMPARE_TASK_ID`.
+
+So no abstraction needed extracting. What needed fixing was a design flaw the generalisation would have multiplied.
+
+**Decision:** Replace BOTH existing controls with one three-mode selector (`_file_selector.html`): all / selected / single.
+
+The two controls could contradict each other. A form could submit `file_id=7` *and* `file_ids=[3,4]`, and the server resolved it with `if file_id_raw: ... else: subset` — silently discarding the checkboxes. Generalising the subset to all eight tasks would have put that contradiction on every form in the application. A silent drop in a legal tool is the failure mode this codebase rejects everywhere else, so the controls were merged rather than multiplied.
+
+Radio buttons rather than a select, for the same reason `authority_mode` is a radio: the lawyer should be able to see that scoping exists, and that "all files" is the default, before choosing.
+
+**Consequences:** `file_ids` left `compare_clauses.yaml` entirely — file scoping is no longer a per-task prompt input but a property of matter mode, read straight off the form by `web.py`. Compare Clauses keeps every behaviour it had (subset selection, the 20-file cap, no single-file mode); only the control moved. Its client-side count gate now reads the shared control; the cap was already enforced server-side in `pipeline.py` and still is.
+
+`run_matter_query` did **not** gain a `file_ids` parameter. It already takes `files: list[MatterFile]`, so scoping is passing a shorter list; adding an id parameter would have duplicated the matter-ownership authorization that belongs in the web layer, where it already lives.
+
+## 2026-08-31: Unqueryable files stay visible in the selector
+**Context:** Files marked `failed_no_text` cannot be searched. The selector could hide them or show them disabled.
+**Decision:** Show them, greyed out, with the reason and a pointer to Re-process.
+
+A document that silently vanishes from a list makes a lawyer wonder whether they imagined uploading it. A greyed row saying "cannot be searched — needs re-processing" turns an invisible gap into a visible, fixable one. This is the same reasoning as the Session 6a result banner naming skipped files.
+
+Three states, not two: `ocr_low_quality` is *queryable* and stays selectable, flagged rather than disabled. Disabled inputs are not submitted, and every submitted id is still authorized server-side, so the UI state is a convenience and never the enforcement.
+
+## 2026-08-31: A v1.0.1 inconsistency, introduced in Session 6a
+**Context:** Session 6a added `ocr_low_quality` and `matters.is_queryable()`, and updated the whole-matter path to use it. It did **not** update the single-file path (`web.py:619`) or the Compare Clauses subset path (`:663`), both of which still tested `!= "ingested"`. The selector's options meanwhile came from `queryable`, which includes `ocr_low_quality`.
+
+Net effect in v1.0.1: a lawyer could pick a "Poor scan quality" file from the dropdown and be refused — "is not successfully ingested" — for a file that searching the whole matter happily included.
+**Decision:** Both paths now use `matters.is_queryable()`. One predicate, one meaning of "searchable", used everywhere.
+**Consequences:** Worth recording as a pattern, not just a fix: adding a status value is not done until every branch that tests status has been found. A grep for the old literal would have caught this at the time.
+
+## 2026-08-31: Date-prefix sorting, calibrated on the pilot lawyer's real filenames
+**Context:** Lawyers name matter documents by date, and the file list was in upload order.
+**Decision:** `matters.parse_date_prefix()` reads a leading date, and `matters.sort_files()` orders dated files chronologically with undated files alphabetically after them.
+
+The rules were calibrated against the actual filenames in the pilot matter rather than invented. Those turned out to include a convention neither the brief nor the proposal anticipated — **date ranges**, in two forms:
+
+```
+2024-04-01 to 2026-04-30 - email exchange re. Heat pump.pdf
+2026-01-21 - 2026-03-26 - Condo manage email re inspection.pdf
+2026-03-27 - Technician Report Form.pdf
+Condo Bylaw 6.pdf
+```
+
+Note the second: the same " - " separates the two dates *and* the date block from the description. Ranges sort by their start date, so a plain prefix parser would already order all of these correctly — the range is recognised anyway so the parsed value is honest and a future date column has real data.
+
+**What deliberately does not parse**, and why the refusals matter more than the matches:
+
+* `3-15-24_letter.pdf` — US order. Read as YY-MM-DD it is month 15, so it is rejected by date validation. US order is never *attempted*: `03-04-05` is valid in three different orderings, and silently guessing wrong in a legal chronology is worse than not sorting at all.
+* `letter_24-03-15.pdf` — not a prefix. A mid-name number is as likely to be a court file number, a docket, or an amount.
+* `23_march_letter.pdf` — is 23 a day or a year?
+
+Two-digit years pivot at 70 (00–69 → 2000s, 70–99 → 1900s), since a matter may reference a 1998 document.
+
+"Newest first" reverses the dated group only; the undated tail stays A–Z, because reverse-alphabetical is not something anyone asked for and reads as a bug.
+
+**Consequences:** One ordering feeds the file list, the selector, and Compare Clauses' column order, so "the third file down" means the same thing everywhere. Compare Clauses columns are therefore chronological rather than upload-ordered — the one behaviour change in this session for a lawyer who touches nothing, disclosed and accepted.
+
+## 2026-08-31: Sort preference is a preference, not matter data
+**Context:** The preference had to persist per matter, but Session 7 was otherwise migration-free.
+**Decision:** `<data_dir>/ui_prefs.json`, keyed by matter id, via `maintenance.get_matter_sort` / `set_matter_sort`.
+
+A `matters` table column would have meant a schema change plus a migration on every installed copy, for a display preference that is disposable — losing it costs one dropdown click. Same reasoning as `notices.json` in Session 6a: data-directory JSON is the right home for state that is neither matter content nor worth migrating for. Writes never raise; a preference that fails to save is not an error worth showing a lawyer.
+
+## 2026-08-31: Run scope is reported separately from provenance
+**Context:** The result page already had a "Drew on" line listing files that grounded the answer. Scope is a different fact.
+**Decision:** A banner above the answer states what the run was scoped to — "Ran against 5 of 28 files: …" — distinct from the provenance line below it.
+
+Scope is what the lawyer *chose*; provenance is what actually contributed. A file can be in scope and contribute nothing, and conflating the two would let a narrowed run be mistaken later for a complete one. Placed above the answer for the same reason as the Session 6a incomplete-retrieval banner: the reader needs to know the shape of the run before reading its conclusions.
+
+The audit log records `scope` and `scoped_file_ids` **only when the scope is not the default**, so records from default runs keep exactly the shape they had before Session 7.
+
+## 2026-08-31: Support report gains a README and loses its heading
+**Context:** Session 6a put the diagnostic behind a "Having trouble?" section on the matters page. Feedback was that it needed to be findable without being alarming, and that a lawyer handed a JSON file has no idea whether it is safe to send.
+**Decision:** A quiet "Generate support report" link at the foot of the matters page with explanatory hover text, and a plain-English README written beside every generated report saying what to send, to whom, what it contains, and — the part that decides whether it gets sent — what it does not.
+
+(For the record: the report was never CLI-only. It shipped in v1.0.1 as a button on the matters page and on the error page. What changed here is tone, placement, and the README.)

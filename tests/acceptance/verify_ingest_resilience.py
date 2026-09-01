@@ -208,7 +208,9 @@ def main() -> int:
     print("\n8. DIAGNOSTIC: useful, and free of client content")
     report = maintenance.build_diagnostic_report()
     blob = str(report)
-    check("records app version", report.get("app_version") == "1.0.1")
+    from matter_clerk import __version__ as pkg_version
+    check("records app version", report.get("app_version") == pkg_version,
+          pkg_version)
     check("counts files by status", bool(report["summary"]["by_status"]),
           str(report["summary"]["by_status"]))
     check("NO filenames leak", "healthy.pdf" not in blob and "hollow.pdf" not in blob)

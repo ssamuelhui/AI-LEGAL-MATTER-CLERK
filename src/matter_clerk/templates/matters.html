@@ -56,17 +56,12 @@
   .matter-list .meta { color: #666; font-size: 12px; display: block; margin-top: 2px; }
 </style>
 
-<section class="block">
-  <h2>Having trouble?</h2>
-  <p class="sub">
-    If Matter Clerk is behaving oddly &mdash; tasks failing, files that will not
-    search &mdash; create a diagnostic report and send it to your Matter Clerk
-    contact. It describes the structure of your installation only:
-    <strong>no document text, no matter names, no file names, no API keys</strong>.
-  </p>
+<div class="support-line">
   <form method="post" action="{{ url_for('run_diagnostics') }}">
-    <button type="submit" class="btn-small">Create diagnostic report</button>
+    <button type="submit" class="linklike"
+            title="Creates a file describing your installation's structure -- no document text, matter names, file names or API keys -- for you to email to support.">Generate
+      support report</button>
   </form>
-</section>
+</div>
 
 {% endblock %}

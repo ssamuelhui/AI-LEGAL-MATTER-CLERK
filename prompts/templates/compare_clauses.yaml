@@ -11,15 +11,12 @@ inputs:
     # reads as noise to the model. Matches the label style of every other task.
     label: Clauses to compare
     placeholder: "e.g. 'indemnity clauses', 'termination for convenience', 'insurance and coverage responsibilities'."
-  # Runtime-populated: one checkbox per ingested file in this matter. Empty means
-  # every file. `control: true` keeps the submitted file ids out of both the embed
-  # query and the REQUEST section — they steer which documents are compared, they
-  # are not content to compare.
-  - name: file_ids
-    type: file_multiselect
-    required: false
-    control: true
-    label: Compare across which files?
+  # File scoping moved out of this template in Session 7. It is no longer a
+  # per-task input: every matter-mode task now gets the same three-mode
+  # scope control (all / selected / single) from _file_selector.html, and
+  # web.py reads `file_ids` straight off the form. Compare Clauses keeps
+  # exactly the behaviour it had -- subset selection, a 20-file cap, and no
+  # single-file mode -- it just no longer owns the control.
 
 # Deliberately EMPTY. Every other task blends a seed query with the user's input;
 # here the user's "clauses to compare" text IS the retrieval query, unreformulated.

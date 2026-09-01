@@ -112,6 +112,22 @@
 {# Session 6a: files the search index could not read. Shown ABOVE the answer,
    not below it -- a lawyer must know the answer is partial before they read
    it, not after they have relied on it. #}
+{# Session 7: the scope the lawyer chose, stated before the answer. Distinct
+   from the "Drew on" provenance below, which reports what actually grounded
+   the answer -- a file can be in scope and contribute nothing. #}
+{% if scope_total %}
+<div class="banner info scope-line">
+  {% if scope_mode == 'all' %}
+    Ran against all {{ scope_total }} file(s) in this matter.
+  {% elif scope_mode == 'single' %}
+    Ran against 1 of {{ scope_total }} files: <strong>{{ scope_names[0] }}</strong>
+  {% else %}
+    Ran against {{ scope_names|length }} of {{ scope_total }} files:
+    {% for n in scope_names %}<strong>{{ n }}</strong>{% if not loop.last %}, {% endif %}{% endfor %}
+  {% endif %}
+</div>
+{% endif %}
+
 {% for w in retrieval_warnings %}
 <div class="banner warn"><strong>Incomplete retrieval.</strong> {{ w }}</div>
 {% endfor %}

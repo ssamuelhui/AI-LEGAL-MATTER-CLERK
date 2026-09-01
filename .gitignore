@@ -66,3 +66,11 @@ models/
 
 # Session 5: compiled installer (~197 MB, rebuildable from the bundle).
 installer/output/
+
+# Session 6a/7 runtime state written into the data directory (which is the
+# repo root in a source checkout).
+/ui_prefs.json
+/update_check.json
+/notices.json
+/migrations/
+matter-clerk-diagnostic-*.json

@@ -99,6 +99,115 @@ def _store_ok() -> tuple[bool, str | None]:
     return store_ok()
 
 
+# --------------------------------------------------------------------------
+# File-scope selection (Session 7)
+#
+# One shared shape for the selector, used by every matter-mode task. The three
+# modes -- all / selected / single -- were previously two separate controls
+# that could contradict each other, with the server silently preferring one.
+# --------------------------------------------------------------------------
+SCOPE_ALL = "all"
+SCOPE_SELECTED = "selected"
+SCOPE_SINGLE = "single"
+
+# Tasks that reason about the matter as a whole. They keep subset selection --
+# narrowing which documents inform the analysis is meaningful -- but single-file
+# mode is a contradiction and stays unavailable.
+WHOLE_MATTER_TASKS = ("compare_clauses", "suggest_cases")
+
+
+def _matter_files_for_selection(files) -> list[dict]:
+    """Shape a matter's files for the selector partial.
+
+    Unqueryable files are INCLUDED but disabled, with the reason shown. Hiding
+    them would make a lawyer wonder where a document went; showing them greyed
+    out with "cannot be searched" turns an invisible gap into a visible, fixable
+    one. Disabled inputs are not submitted, and every submitted id is still
+    authorized server-side regardless.
+    """
+    out = []
+    for f in files:
+        queryable = matters.is_queryable(f.ingest_status)
+        badge = matters.STATUS_LABELS.get(f.ingest_status, f.ingest_status)
+        if f.ingest_status == "ingested":
+            badge, badge_class, note = "", "", ""
+        elif f.ingest_status == "ocr_low_quality":
+            badge_class = "badge-warn"
+            note = "answers from this file may be thin"
+        else:
+            badge_class = "badge-bad"
+            note = "cannot be searched — needs re-processing"
+        out.append({
+            "id": f.id,
+            "filename": f.filename,
+            "file_type": f.file_type,
+            "queryable": queryable,
+            "status": f.ingest_status,
+            "status_badge": badge,
+            "badge_class": badge_class,
+            "status_note": note,
+        })
+    return out
+
+
+def _resolve_scope(conn, matter_id: int, task: str, form, queryable_files):
+    """Turn the submitted scope controls into (files, single_file, error).
+
+    Exactly one of `files` / `single_file` is returned. Every submitted id is
+    checked for membership of THIS matter and for queryability, so a tampered
+    or stale id is a clear refusal rather than a 500 or a silent drop.
+    """
+    mode = (form.get("scope_mode") or SCOPE_ALL).strip()
+
+    if mode == SCOPE_SINGLE and task not in WHOLE_MATTER_TASKS:
+        raw = (form.get("file_id") or "").strip()
+        if not raw:
+            return None, None, "Please choose a file, or select all files."
+        try:
+            fid = int(raw)
+        except (TypeError, ValueError):
+            return None, None, "Please choose a file to query."
+        try:
+            mf = matters.get_file_in_matter(conn, matter_id, fid)
+        except matters.MatterError as e:
+            return None, None, str(e)
+        # is_queryable, not == "ingested": Session 6a made ocr_low_quality a
+        # searchable status, and the whole-matter path already honours that.
+        if not matters.is_queryable(mf.ingest_status):
+            return None, None, (
+                f"{mf.filename} cannot be searched "
+                f"(status: {matters.STATUS_LABELS.get(mf.ingest_status, mf.ingest_status)}). "
+                "Re-process it from the file list above."
+            )
+        return None, mf, None
+
+    if mode == SCOPE_SELECTED:
+        picked: set[int] = set()
+        for raw in form.getlist("file_ids"):
+            try:
+                fid = int(raw)
+            except (TypeError, ValueError):
+                return None, None, "Invalid file selection."
+            try:
+                sel = matters.get_file_in_matter(conn, matter_id, fid)
+            except matters.MatterError as e:
+                return None, None, str(e)
+            if not matters.is_queryable(sel.ingest_status):
+                return None, None, (
+                    f"{sel.filename} cannot be searched "
+                    f"(status: {matters.STATUS_LABELS.get(sel.ingest_status, sel.ingest_status)})."
+                )
+            picked.add(fid)
+        if picked:
+            chosen = [f for f in queryable_files if f.id in picked]
+            if not chosen:
+                return None, None, "None of the selected files can be searched."
+            return chosen, None, None
+        # An empty selection means "all files" -- the same as not choosing.
+
+    return list(queryable_files), None, None
+
+
 def _collect_web_inputs(template, form) -> dict:
     """Pull this task's declared inputs out of the submitted form."""
     inputs: dict = {}
@@ -138,7 +247,8 @@ def _display_inputs(template, structured_inputs: dict) -> dict:
 
 
 def _render_result(
-    result, template, task, structured_inputs, back_url, back_label, matter_name=None
+    result, template, task, structured_inputs, back_url, back_label, matter_name=None,
+    scope_mode="all", scope_names=None, scope_total=0,
 ):
     """Render result.html. Shared by the ad-hoc and matter query paths; the only
     per-context difference is the back link."""
@@ -169,6 +279,13 @@ def _render_result(
 
     return render_template(
         "result.html",
+        # Session 7: what the run was SCOPED to, which is a different fact from
+        # "Drew on" / retrieved_sources. Scope is what the lawyer chose;
+        # provenance is what actually grounded the answer. A file can be in
+        # scope and contribute nothing, and the difference matters.
+        scope_mode=scope_mode,
+        scope_names=scope_names or [],
+        scope_total=scope_total,
         is_compare=is_compare,
         export_token=export_token,
         export_formats=export.list_export_formats(payload),
@@ -320,6 +437,16 @@ def create_app() -> Flask:
             conn.close()
         return redirect(url_for("matter_detail", matter_id=matter_id))
 
+    @app.post("/matters/<int:matter_id>/sort")
+    def set_matter_sort(matter_id: int):
+        """Remember this matter's file ordering. A preference, not matter data:
+        stored in the data directory's ui_prefs.json rather than the database,
+        so no schema change and no migration on installed copies."""
+        order = (request.form.get("sort") or matters.DEFAULT_SORT).strip()
+        if order in matters.SORT_ORDERS:
+            maintenance.set_matter_sort(matter_id, order)
+        return redirect(url_for("matter_detail", matter_id=matter_id))
+
     @app.post("/matters/<int:matter_id>/remove-failed")
     def remove_failed_files(matter_id: int):
         conn = matters.connect()
@@ -388,19 +515,29 @@ def create_app() -> Flask:
 
     def render_matter_detail(conn, matter_id, status=200, **kw):
         matter = matters.get_matter(conn, matter_id)
-        files = matters.list_files(conn, matter_id)
+        # Session 7: one ordering for the file list AND the scope selector, so
+        # a lawyer picking "the third one down" sees the same third one in both.
+        sort_order = maintenance.get_matter_sort(matter_id)
+        files = matters.sort_files(matters.list_files(conn, matter_id), sort_order)
         queryable = [f for f in files if matters.is_queryable(f.ingest_status)]
         ok, err = _store_ok()
         defaults = dict(
             store_ok=ok, store_err=err, error=None,
             matter=matter, files=files,
             queryable_files=queryable, matter_files=queryable,
+            # The selector shows unqueryable files too, disabled with a reason:
+            # a document that silently vanishes from the list is a worse
+            # experience than one shown greyed out with a way to fix it.
+            selector_files=_matter_files_for_selection(files),
+            sort_order=sort_order,
+            sort_orders=matters.SORT_ORDERS,
+            sort_labels=matters.SORT_LABELS,
             # Compare Clauses appears only once the matter holds 2+ ingested files.
             tasks=available_tasks(len(queryable)),
             compare_max_files=pipeline.COMPARE_MAX_FILES,
             selected_task=DEFAULT_TASK,
             values={}, top_k="", limitation_signals=None, limitation_by_file=None,
-            selected_file_id=None,
+            selected_file_id=None, selected_file_ids=[], scope_mode="all",
             action=url_for("matter_query", matter_id=matter_id),
         )
         defaults.update(kw)
@@ -560,6 +697,8 @@ def create_app() -> Flask:
             common = dict(
                 selected_task=task, values=structured_inputs,
                 top_k=top_k_raw, selected_file_id=file_id_raw,
+                scope_mode=(request.form.get("scope_mode") or "all"),
+                selected_file_ids=request.form.getlist("file_ids"),
             )
 
             # Server-side counterparts to the form's task filtering + JS gating
@@ -594,81 +733,46 @@ def create_app() -> Flask:
                           "comparison instead.", **common
                 )
 
-            # Dispatch on file_id presence (Day 4b). Default (no file_id) queries
-            # the whole matter via scatter-gather; an explicit file_id restricts
-            # to that one file — today's single-collection path, unchanged.
-            mf = None
-            files = None
-            if file_id_raw:
-                # ---- single-file branch: resolve + authorize BEFORE any work. A
-                # file_id that is non-integer, unknown, or from another matter is
-                # a clear refusal, never a 500. (Behaviour preserved from Day 4a.)
-                try:
-                    file_id = int(file_id_raw)
-                except (TypeError, ValueError):
-                    return render_matter_detail(
-                        conn, matter_id, status=400,
-                        error="Please choose a file to query.", **common
-                    )
-                try:
-                    mf = matters.get_file_in_matter(conn, matter_id, file_id)
-                except matters.MatterError as e:  # FileNotInMatter / unknown id
-                    return render_matter_detail(
-                        conn, matter_id, status=400, error=str(e), **common
-                    )
-                if mf.ingest_status != "ingested":
-                    return render_matter_detail(
-                        conn, matter_id, status=400,
-                        error=f"{mf.filename} is not successfully ingested "
-                              f"(status: {mf.ingest_status}).", **common
-                    )
+            # Session 7: one scope resolution for every task, replacing the
+            # old two-control dispatch. `_resolve_scope` returns either a file
+            # LIST (all / selected) or a single file, having authorized every
+            # submitted id against this matter first.
+            queryable_files = [
+                f for f in matters.list_files(conn, matter_id)
+                if matters.is_queryable(f.ingest_status)
+            ]
+            queryable_files = matters.sort_files(
+                queryable_files, maintenance.get_matter_sort(matter_id)
+            )
+            if not queryable_files:
+                return render_matter_detail(
+                    conn, matter_id, status=400,
+                    error="This matter has no successfully ingested files to "
+                          "query.", **common
+                )
+
+            files, mf, scope_error = _resolve_scope(
+                conn, matter_id, task, request.form, queryable_files
+            )
+            if scope_error:
+                return render_matter_detail(
+                    conn, matter_id, status=400, error=scope_error, **common
+                )
+
+            # What the run was actually scoped to. Reported on the result page
+            # and, when it is not the default, in the audit log -- "which files
+            # did this run touch" is the question a later review asks.
+            scope_total = len(queryable_files)
+            if mf is not None:
+                scope_mode_used, scope_names, scope_ids = "single", [mf.filename], [mf.id]
+            elif files is not None and len(files) < scope_total:
+                scope_mode_used = "selected"
+                scope_names = [f.filename for f in files]
+                scope_ids = [f.id for f in files]
             else:
-                # ---- whole-matter branch: every successfully-ingested file ----
-                files = [
-                    f for f in matters.list_files(conn, matter_id)
-                    if matters.is_queryable(f.ingest_status)
-                ]
-                if not files:
-                    return render_matter_detail(
-                        conn, matter_id, status=400,
-                        error="This matter has no successfully ingested files to "
-                              "query.", **common
-                    )
-                if task == pipeline.COMPARE_TASK_ID:
-                    # Optional user subset. Authorize every submitted id against
-                    # this matter exactly as the file_id path does — a tampered
-                    # or foreign id is a refusal, never a 500 and never a silent
-                    # drop. Column order follows the matter's file order, not the
-                    # order the checkboxes happened to submit in.
-                    picked_raw = structured_inputs.get("file_ids") or []
-                    if picked_raw:
-                        picked: set[int] = set()
-                        for raw in picked_raw:
-                            try:
-                                fid = int(raw)
-                            except (TypeError, ValueError):
-                                return render_matter_detail(
-                                    conn, matter_id, status=400,
-                                    error="Invalid file selection.", **common
-                                )
-                            try:
-                                sel = matters.get_file_in_matter(
-                                    conn, matter_id, fid
-                                )
-                            except matters.MatterError as e:
-                                return render_matter_detail(
-                                    conn, matter_id, status=400,
-                                    error=str(e), **common
-                                )
-                            if sel.ingest_status != "ingested":
-                                return render_matter_detail(
-                                    conn, matter_id, status=400,
-                                    error=f"{sel.filename} is not successfully "
-                                          f"ingested (status: "
-                                          f"{sel.ingest_status}).", **common
-                                )
-                            picked.add(fid)
-                        files = [f for f in files if f.id in picked]
+                scope_mode_used = "all"
+                scope_names = [f.filename for f in (files or [])]
+                scope_ids = []
 
             missing = missing_required_inputs(template, structured_inputs)
             if missing:
@@ -791,6 +895,11 @@ def create_app() -> Flask:
                     matter_id=matter_id,
                     task=task,
                     retrieved_file_ids=result.retrieved_file_ids,
+                    # Only when the lawyer narrowed the scope: on the default
+                    # path this stays absent, so existing audit records keep
+                    # exactly the shape they had before Session 7.
+                    **({"scope": scope_mode_used, "scoped_file_ids": scope_ids}
+                       if scope_mode_used != "all" else {}),
                 )
 
             matters.touch_last_queried(conn, matter_id)
@@ -799,6 +908,9 @@ def create_app() -> Flask:
                 back_url=url_for("matter_detail", matter_id=matter_id),
                 back_label="Back to matter",
                 matter_name=matters.get_matter(conn, matter_id).name,
+                scope_mode=scope_mode_used,
+                scope_names=scope_names,
+                scope_total=scope_total,
             )
         finally:
             conn.close()
