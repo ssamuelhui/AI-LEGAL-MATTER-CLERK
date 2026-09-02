@@ -406,34 +406,36 @@
             if (d.error) { alert(d.error); return; }
             var mins = Math.max(1, Math.round(d.seconds_low / 60)) + "-" +
                        Math.max(2, Math.round(d.seconds_high / 60)) + " minutes";
-            var msg =
-              "Run exhaustive analysis?
-
-" +
+            // Built as an array joined once, NOT a multi-line concatenation.
+            // The previous form had twelve separate \n escape sites and a
+            // stray line break inside one of them was a syntax error that killed
+            // this entire script -- and with it every JS-driven control on the
+            // form. One join means one escape site, and a stray break becomes a
+            // visible error inside an array literal.
+            var lines = [
+              "Run exhaustive analysis?",
+              "",
               "This reads every page of " + d.files + " file(s) - " +
-              d.chunks + " passages, about " +
-              d.input_tokens.toLocaleString() + " tokens of text - instead of " +
-              "the most relevant extracts.
-
-" +
-              "Expected time:  " + mins + "
-" +
+                d.chunks + " passages, about " +
+                d.input_tokens.toLocaleString() +
+                " tokens of text - instead of the most relevant extracts.",
+              "",
+              "Expected time:  " + mins,
               "Estimated cost: $" + d.cost_low.toFixed(2) + " - $" +
-              d.cost_high.toFixed(2) + " in API usage
-" +
-              "Model:          " + d.model + "
-
-" +
-              (d.unreadable && d.unreadable.length
-                 ? "WARNING: " + d.unreadable.length + " selected file(s) " +
-                   "cannot be read and will be left out.
-
-" : "") +
-              "Exhaustive mode includes everything it finds, including minor " +
-              "and routine items. Expect a much longer result.
-
-" +
-              "You can close the tab while it runs and come back to it.";
+                d.cost_high.toFixed(2) + " in API usage",
+              "Model:          " + d.model,
+              ""
+            ];
+            if (d.unreadable && d.unreadable.length) {
+              lines.push("WARNING: " + d.unreadable.length +
+                         " selected file(s) cannot be read and will be left out.",
+                         "");
+            }
+            lines.push("Exhaustive mode includes everything it finds, including " +
+                       "minor and routine items. Expect a much longer result.",
+                       "",
+                       "You can close the tab while it runs and come back to it.");
+            var msg = lines.join("\n");
             if (window.confirm(msg)) {
               confirmed = true;
               document.getElementById("askform").requestSubmit();
