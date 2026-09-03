@@ -141,6 +141,10 @@ def main(argv: list[str] | None = None) -> int:
 
     updater.start_background_check()
 
+    # Session 10: permanently remove items whose 30-day recovery window has
+    # passed. Background, bounded, and never able to delay startup.
+    maintenance.start_purge_in_background()
+
     # --- 7. server -----------------------------------------------------------
     import logging
 

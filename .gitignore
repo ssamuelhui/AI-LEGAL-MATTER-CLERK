@@ -77,3 +77,7 @@ matter-clerk-diagnostic-*.json
 
 # Session 8 background run state (data directory = repo root in a checkout).
 /runs/
+
+# Session 10 runtime state (data directory = repo root in a checkout).
+/model_list_cache.json
+/user_preferences.json

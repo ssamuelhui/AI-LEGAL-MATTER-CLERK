@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block subtitle %} &mdash; Settings{% endblock %}
+{% block content %}
+
+<nav><a href="{{ url_for('index') }}">&larr; All matters</a></nav>
+
+<section class="block">
+  <h2>API keys</h2>
+  <p class="sub">
+    Stored on this computer only, in <code>{{ env_path }}</code>. A key is
+    tested against its service before it is saved, so a mistyped key is
+    refused here rather than failing later in the middle of a task.
+  </p>
+
+  {% for row in [
+      {'which': 'openrouter', 'label': 'OpenRouter',
+       'masked': openrouter_masked,
+       'note': 'Required. Used for drafting, analysis and every AI task.',
+       'link': 'https://openrouter.ai/keys'},
+      {'which': 'canlii', 'label': 'CanLII',
+       'masked': canlii_masked,
+       'note': 'Optional. Without it, case-law tasks are unavailable; everything else works.',
+       'link': ''}] %}
+  <div class="key-row">
+    <div class="key-head">
+      <strong>{{ row.label }}</strong>
+      {% if row.masked %}
+        <code class="key-mask" id="mask-{{ row.which }}">{{ row.masked }}</code>
+      {% else %}
+        <span class="badge badge-bad">Not set</span>
+      {% endif %}
+    </div>
+    <div class="hint">{{ row.note }}
+      {% if row.link %}<a href="{{ row.link }}" target="_blank" rel="noopener">Get a key</a>{% endif %}
+    </div>
+    <form method="post" action="{{ url_for('save_api_key') }}" class="key-form">
+      <input type="hidden" name="which" value="{{ row.which }}">
+      <input type="password" name="value" autocomplete="off" spellcheck="false"
+             placeholder="Paste a new {{ row.label }} key" id="in-{{ row.which }}">
+      <label class="inline">
+        <input type="checkbox" onchange="mcToggleKey('{{ row.which }}', this.checked)">
+        Show
+      </label>
+      <button type="submit" class="btn-small">Test and save</button>
+    </form>
+  </div>
+  {% endfor %}
+
+  <div class="hint" style="margin-top:10px;">
+    Changing a key does not interrupt anything already running &mdash; a task in
+    progress finishes on the key it started with, and the next task uses the new
+    one.
+  </div>
+</section>
+
+<section class="block">
+  <h2>AI model for each task</h2>
+
+  {% if catalogue.degraded %}
+  <div class="banner warn">
+    <strong>Couldn&rsquo;t load the full model list.</strong>
+    Showing recommended models only &mdash; check your connection. Your saved
+    choices are unchanged.
+  </div>
+  {% elif catalogue.stale %}
+  <div class="banner info">
+    Model list last updated {{ catalogue.age_hours|round|int }} hours ago.
+    Refreshing in the background.
+  </div>
+  {% endif %}
+
+  <p class="sub">
+    Recommended models are starred and listed first &mdash; those are the ones
+    these tasks have been tested against. {{ picker|length }} models available.
+    Prices are a rough guide: <strong>$</strong> cheapest half of the catalogue,
+    <strong>$$$</strong> most expensive tenth.
+  </p>
+
+  <table class="file-table">
+    <thead><tr><th>Task</th><th>Model</th><th></th></tr></thead>
+    <tbody>
+      {% for t in tasks %}
+      {% set chosen = preferences.get(t.id) or default_model %}
+      <tr>
+        <td>{{ t.label }}</td>
+        <td>
+          <form method="post" action="{{ url_for('save_model_preference') }}"
+                class="model-form">
+            <input type="hidden" name="task" value="{{ t.id }}">
+            {% include "_model_picker.html" %}
+        </td>
+        <td>
+            <button type="submit" class="btn-small">Save</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="hint" style="margin-top:12px;">
+    <strong>Exhaustive mode always uses <code>{{ exhaustive_model }}</code></strong>,
+    whatever is set here. Weaker models silently omit events, which defeats the
+    point of reading every page. Documented in the v1.0.3 release notes.
+  </div>
+</section>
+
+<section class="block">
+  <h2>Deleted items</h2>
+  <p class="sub">
+    Deleted matters and files are kept for 30 days before being removed
+    permanently. <a href="{{ url_for('deleted_items') }}">View deleted items</a>
+  </p>
+</section>
+
+<script>
+  function mcToggleKey(which, show) {
+    var el = document.getElementById("in-" + which);
+    if (el) el.type = show ? "text" : "password";
+  }
+</script>
+
+{% endblock %}

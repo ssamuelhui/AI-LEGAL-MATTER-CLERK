@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block subtitle %} &mdash; Deleted items{% endblock %}
+{% block content %}
+
+<nav><a href="{{ url_for('index') }}">&larr; All matters</a></nav>
+
+<section class="block">
+  <h2>Deleted items</h2>
+  <p class="sub">
+    Deleted matters and files are kept for {{ window }} days, then removed
+    permanently along with their search index. Nothing here has been erased yet.
+  </p>
+
+  {% for cat, msg in get_flashed_messages(with_categories=true) %}
+  <div class="banner {{ 'info' if cat == 'ok' else cat }}">{{ msg }}</div>
+  {% endfor %}
+
+  {% if not deleted_matters and not deleted_files %}
+  <p class="sub">Nothing has been deleted.</p>
+  {% endif %}
+
+  {% if deleted_matters %}
+  <h3 style="font-size:13px;margin-top:18px;">Matters</h3>
+  <table class="file-table">
+    <thead><tr><th>Matter</th><th>Files</th><th>Deleted</th><th>Time left</th><th></th></tr></thead>
+    <tbody>
+      {% for m in deleted_matters %}
+      {% set left = days_remaining(m.deleted_at) %}
+      <tr>
+        <td>{{ m.name }}</td>
+        <td>{{ m.file_count }}</td>
+        <td>{{ m.deleted_at[:10] }}</td>
+        <td class="{{ 'expiring' if left <= 7 else '' }}">
+          {{ left }} day{{ '' if left == 1 else 's' }}
+        </td>
+        <td>
+          <form method="post" action="{{ url_for('restore_matter', matter_id=m.id) }}" style="margin:0">
+            <button type="submit" class="btn-small">Restore</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if deleted_files %}
+  <h3 style="font-size:13px;margin-top:22px;">Files</h3>
+  <table class="file-table">
+    <thead><tr><th>File</th><th>Matter</th><th>Type</th><th>Deleted</th><th>Time left</th><th></th></tr></thead>
+    <tbody>
+      {% for row in deleted_files %}
+      {% set f = row.file %}
+      {% set left = days_remaining(f.deleted_at) %}
+      <tr>
+        <td>{{ f.filename }}</td>
+        <td>{{ row.matter_name }}{% if row.matter_deleted %}
+              <span class="badge badge-bad">matter deleted</span>{% endif %}</td>
+        <td>{{ f.file_type }}</td>
+        <td>{{ f.deleted_at[:10] }}</td>
+        <td class="{{ 'expiring' if left <= 7 else '' }}">
+          {{ left }} day{{ '' if left == 1 else 's' }}
+        </td>
+        <td>
+          {% if row.matter_deleted %}
+            <span class="hint">restore the matter first</span>
+          {% else %}
+          <form method="post" action="{{ url_for('restore_file', file_id=f.id) }}" style="margin:0">
+            <button type="submit" class="btn-small">Restore</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+{% endblock %}

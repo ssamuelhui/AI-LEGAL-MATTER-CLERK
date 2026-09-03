@@ -798,3 +798,141 @@ With both corrections the estimate brackets reality: $0.42–$0.79 shown against
 The copy is careful in one specific way: it says the exhaustive **mode** is under evaluation, not that Summarize or Find Entities are preview features. A lawyer who concludes that Summarize itself is provisional would stop trusting a task that has been stable since Phase 1.
 
 `is_exhaustive()` matches on `startswith("Exhaustive")` rather than equality, so the visible label can change without silently switching the mode off.
+
+## 2026-09-02: python-docx silently drops tracked insertions (Session 9)
+**Context:** The brief assumed "extract only accepted text" came free from python-docx. It does not, and the failure is silent and one-directional.
+**Decision:** Extract text by walking `w:t` descendants of the paragraph element, skipping `w:delText`.
+
+`Paragraph.runs` returns only `<w:r>` elements that are DIRECT children of `<w:p>`. A tracked insertion nests its run inside `<w:ins>`, so `Paragraph.text` never sees it. Deletions use `w:delText`, which `.text` also skips. The net effect is that python-docx returns *neither* insertions nor deletions — the original text, not the accepted text.
+
+Demonstrated during design on a document built for the purpose: a paragraph of "PLAIN + INSERTED + DELETED" yields only "PLAIN".
+
+For a legal tool this is the difference between indexing a contract and indexing a superseded draft of it. An amended agreement would be searched with its amendments missing, answers would be grounded in the wrong text, and nothing anywhere would say so. Walking `w:t` and excluding `w:delText` gives exactly the all-changes-accepted view: insertions in, deletions out.
+
+**Consequences:** Locked in by a test that asserts both directions on a purpose-built document, including an assertion that python-docx *alone* still loses the insertion — so if the library ever changes behaviour the test says so rather than quietly passing for a new reason. Note for the record: `docs/SoW.docx` contains 22 `<w:ins>` elements but they are paragraph-mark insertions carrying no text, so that file does not exercise the bug.
+
+## 2026-09-02: Word chunks are heading-bounded and packed to the same token target
+**Decision:** Walk the document body in order, tag each paragraph and table with the heading path in force, then pack blocks to ~700 tokens without crossing a heading or table boundary.
+
+Two library behaviours forced the shape. `document.paragraphs` and `document.tables` are separate collections with no interleaving, so reading them in turn puts every table at the end of the document and attributes it to the wrong heading; the body XML is walked instead. And 52 of 199 paragraphs in this project's own SoW.docx have `style is None`, so style access is guarded everywhere.
+
+Measured on that file: 47 heading-bounded sections, median 86 tokens, **max 448 — none exceed 700**. One chunk per section is the normal case and splitting is the rare path. When a section does exceed the budget it splits into parts that all keep the section locator plus "(part 2 of 3)", so a citation still names something a lawyer can turn to.
+
+Tables split on whole rows only. Half a row of a party schedule is worse than no row: the columns stop lining up and the fragment reads as a different fact. Continuation chunks repeat the header row.
+
+Headings are emitted as content, not only as metadata — a clause is often named nowhere else, and dropping the heading loses that name from the index.
+
+## 2026-09-02: Excel chunking sized by tokens, not rows -- and the header is not row 1
+**Context:** The brief specified 50 rows per chunk and a row-1 header. Both were wrong against the pilot lawyer's actual spreadsheets, and the design was calibrated on those two files rather than on a hypothetical budget sheet.
+
+    Submission List - Invoice   521 rows x 15 cols   76.8 tokens/row
+    Invoice on May 20, 2026     379 rows x 82 cols   63.5 tokens/row
+
+**Decision, four rules, each replacing an assumption:**
+
+*Pack to ~700 tokens, not to a row count.* Fifty rows would have produced 3,176–3,839-token chunks against the 700-token target every other format uses. Oversized chunks distort cosine ranking against normal chunks, consume the top-k budget (one such chunk exceeds five PDF chunks), and break the ~475-token-per-chunk assumption in Session 8's batch planner. Packing by tokens lands at ~8 rows for these files.
+
+*Score for the header row; do not assume row 1.* In `Invoice on May 20, 2026` rows 1–2 are a title and a description and the real header is row 3. A row-1 assumption would have stamped "A. LIST OF STUDENTS..." onto every chunk of that sheet as its column list. A score over breadth, brevity and non-numeric content separates them cleanly: 56 vs 43 in the first file, 72 vs 56 vs 0 in the second.
+
+*Drop empty columns.* That sheet reports 82 columns and populates 18. Rendering all 82 makes every row two-thirds empty delimiters.
+
+*Skip empty rows; do not split on them.* Every empty-row run in both files is a single row, and singles occur inside the data. The brief's "5+ consecutive rows is a boundary" would never once have fired.
+
+**The header line is repeated in every chunk**, and the reason is not only retrieval quality. Session 8's exhaustive Timeline has to know which column holds dates; a chunk of bare values gives the model no way to tell a date of birth from an invoice date, so downstream extraction fails on unlabelled data. The repetition costs ~15–20 tokens and buys the chunk its meaning.
+
+Dates are rendered as plain ISO dates rather than `str(datetime)`, which would put "00:00:00" on every date cell — noise in the index and misleading in a citation.
+
+## 2026-09-02: Locators must be navigable, not merely unique
+**Decision:** Excel citations carry sheet name, real 1-based Excel row numbers, and the first five column headings.
+
+```
+[Student list.xlsx sheet 'Invoice on May 20, 2026', rows 15-24
+ (cols: Student ID | Last Name | First Name | DOB | Gender ...)]
+```
+
+Row numbers alone are unique but uninterpretable: a lawyer reading "rows 15-24" learns nothing about what is in them. The column list is what makes the citation checkable, truncated so a wide sheet does not produce a citation longer than the passage it labels. Row numbers match Excel's own numbering so the file can be opened at that row.
+
+Word uses `§<heading>` for prose and `Table N "caption", rows A-B` for tables, falling back to `¶N` where a document has no headings.
+
+## 2026-09-02: Encryption and corruption are distinguished by file header
+**Context:** python-docx raises `PackageNotFoundError` and openpyxl raises `InvalidFileException` for BOTH encrypted and corrupt files, so the exception type cannot tell them apart — but the remedies are completely different.
+**Decision:** Sniff the first eight bytes. An encrypted OOXML file is an OLE2 compound document beginning `D0 CF 11 E0 A1 B1 1A E1`; a healthy one is a zip beginning `PK`.
+
+New status `password_protected`, separate from `failed` and not queryable, with a message naming the fix: remove the password, save a copy, upload that. A corrupt file keeps `failed` and says it may be damaged or in an older `.doc`/`.xls` format.
+
+No new dependency — `olefile` is not installed and is not needed for an eight-byte check.
+
+**Also distinguished:** a workbook whose formulas have no cached values, which happens when a file is written by a program and never opened in Excel. `data_only=True` returns `None` for every such cell, so the sheet would index as empty. It is reported with its own remedy (open and save in Excel) rather than as a damaged file.
+
+## 2026-09-02: PDF and email paths were held byte-identical, and proved so
+**Decision:** The `is_email` boolean became a suffix dispatch with Word and Excel as new branches *beside* the existing ones, never inside them.
+
+The guarantee is asserted rather than assumed: chunk lists for the nine real matter PDFs were hashed on the pre-Session-9 tree and the digests pinned into `verify_docx_xlsx_ingestion.py`. All nine match after the change. Adding a dispatcher is exactly the kind of edit that perturbs an existing path by accident, and a hash is the only check that would notice a one-character difference in a locator.
+
+## 2026-09-02: Footnotes deferred
+**Context:** The brief asked for footnotes extracted inline with a citation marker.
+**Decision:** Deferred to BACKLOG. python-docx has no footnote API at all; they live in `word/footnotes.xml` and would need raw XML parsing plus splicing references back into paragraph positions. No sample file available exercises them, so the work would be built and tested against nothing.
+
+## 2026-09-02: Soft delete, and the two UNIQUE constraints nobody budgeted for (Session 10)
+**Context:** `deleted_at TEXT` on `matters` and `files`, NULL meaning live. Straightforward until the existing constraints are considered.
+
+    files:   UNIQUE (matter_id, content_sha256)
+    matters: name TEXT NOT NULL UNIQUE
+
+A soft-deleted row still occupies its uniqueness slot, so a lawyer who deletes a file and re-uploads it hits `DuplicateFileInMatter` for a file they cannot see, and a deleted matter blocks its own name forever.
+
+**Decision: resolve them asymmetrically, because the levels differ.**
+
+*Re-uploading a soft-deleted file RESTORES it.* The intent is unambiguous — they want that file in the matter — and reporting a "duplicate" for an invisible file is baffling. The flash says what happened rather than what the system did: "This file was previously deleted and has been restored to the matter."
+
+*Reusing a deleted matter's name REFUSES, with a pointer to Deleted items.* Auto-restoring an entire matter is too much action for too small a gesture; creating a matter and restoring one are different intentions.
+
+**Collections and files on disk are preserved through the soft-delete window.** Restoring is meant to be free — re-ingesting a 500-page scan to undo a mis-click would not be a recovery window, it would be a punishment.
+
+**Consequences:** every existing read had to become live-only (`deleted_at IS NULL`), including the `LEFT JOIN` that computes `file_count`, or a deleted file would keep inflating its matter's count. `get_matter_any` exists so result pages can render "this matter has been deleted" instead of a 404 for work the lawyer still owns.
+
+## 2026-09-02: The migration must survive running on every request
+**Context:** `init_db()` is called by `connect()`, which runs on essentially every request. SQLite has no `ADD COLUMN IF NOT EXISTS`.
+**Decision:** Check `PRAGMA table_info` before altering. A migration that raises the second time it runs would brick the application on its second request — a sharper version of the Session 6a rule that a migration must never turn a working install into a dead one.
+
+`ADD COLUMN` is metadata-only in SQLite, so there is no table rewrite and every existing row reads NULL, which is exactly "not deleted". Verified by connecting four times in a row.
+
+## 2026-09-02: Permanent deletion runs in the background, not on a startup budget
+**Context:** Expired items need removing, including their Chroma collections, which is the slow part.
+**Decision:** A daemon thread started after the server is already listening, reusing the pattern from `updater.start_background_check()`. Startup cost is zero rather than merely small.
+
+Bounded at 25 items per launch so a large backlog clears over several launches instead of one long pass, and wrapped so a failure cannot touch startup. If the vector store will not open, the rows are left alone rather than dropped — deleting the manifest while the collections survive would orphan them permanently, the same reasoning as the Session 6a backfill.
+
+## 2026-09-02: The model picker is a native select with search layered on top
+**Context:** 425 models on OpenRouter, so a picker needs search. The brief specified a CDN library.
+**Decision:** Custom, ~80 lines of vanilla JS, and the submitted control is a real server-rendered `<select name="model">` containing every option.
+
+**A CDN library was not a close call.** This application is offline-capable by design — bundled embedding model, bundled Tesseract and Poppler, verified in Session 3 running with every outbound HTTP route blackholed. A dropdown fetched from a CDN would silently never initialise on a disconnected laptop, which is precisely the machine this tool was built for. Bundling a library instead would mean a `static/` directory that does not exist, vendored assets and PyInstaller data entries — more moving parts than the widget.
+
+**Progressive enhancement is the structural lesson from Session 8** applied before the fact. When one stray newline killed that inline script, every JS-driven control on the form died with it. Here, if the script throws, the lawyer still has a long but fully working native dropdown, keyboard- and screen-reader-operable for free. The search box is `hidden` in the markup and revealed by the script, so a dead script leaves no orphaned control rather than an input that does nothing.
+
+Search matches every space-separated term against id, name and provider, so "opus 4.7" and "anthropic opus" both work. The currently selected option is never hidden by a filter — hiding a selected `<option>` makes the control display nothing.
+
+## 2026-09-02: Pricing tiers derived from the catalogue, not chosen
+**Decision:** `$` ≤ $2.25, `$$` ≤ $17.50, `$$$` above, in USD per 1M tokens (prompt + completion).
+
+Those are p50 and p90 of the actual distribution across all 425 models, measured rather than guessed: `$` is the cheaper half of the catalogue and `$$$` the most expensive tenth. For orientation: MiMo Pro $1.30, Sonnet 5 $12.00, Sonnet 4.6 $18.00, Opus 4.7 $30.00, and o1-pro at $750 to show what the tail looks like.
+
+If OpenRouter's catalogue shifts materially these should be re-derived rather than nudged — the point is that they describe a real distribution.
+
+**Model ids use dots, not dashes.** `anthropic/claude-opus-4-7` does not exist and 404s; nor does `claude-sonnet-4-7` in any form. Checked against the live list. The third recommended slot is `anthropic/claude-sonnet-5` — newer and cheaper than the 4.6 alternative.
+
+## 2026-09-02: A per-run model override, as a thread-local
+**Context:** Every task path resolves its model through `pipeline._config()`. Threading a parameter through eight call sites would be a wide change for a narrow feature.
+**Decision:** A thread-local override applied at the single point `_config()` is read. `None` means "use MODEL from the environment", which is byte-for-byte v1.0.4 behaviour — so a lawyer who never touches the picker gets exactly what they had.
+
+Exhaustive mode is unaffected: it pins `EXHAUSTIVE_MODEL` explicitly and never consults the override. The requested model is carried into the run state so the result page can state both, and the audit record carries `model_requested`, `model_used` and a separate `model_coerced` boolean — a later auditor should not have to reconstruct intent by comparing two strings.
+
+## 2026-09-02: Key handling — masked, tested, and never logged at any length
+**Decision:** Keys are tested against their live service before being saved, using the same endpoints as the Session 5 first-run wizard, and written through a single `.env` rewrite that also sets `os.environ` explicitly — necessary because python-dotenv does not override variables that are already set, so rewriting the file alone would leave the old key live for the session.
+
+**The mask hides the length as well as the value.** A fixed number of dots, not one per character: the length of an API key narrows the search space, and this string is rendered on a page that may end up in a screenshot in a support thread. Asserted by a test that masks two keys of different lengths and requires the results to be the same size.
+
+Nothing key-shaped reaches a log. The audit entry for a key change records only which service and that the test passed.
+
+**Key changes never interrupt a running task**, and this needed no machinery: `LLMClient` reads the environment once at construction, and each task constructs its own. A task in flight finishes on the key it started with. A multi-batch exhaustive run holds one client for its whole life, so it completes on one key throughout — swapping mid-run would make half a result unattributable.

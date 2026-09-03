@@ -45,9 +45,9 @@
      checkbox list. See _file_selector.html for why they were merged. #}
   {% include "_file_selector.html" %}
   {% else %}
-  <label for="pdf">PDF or email (.eml)</label>
+  <label for="pdf">PDF, Word, Excel or email</label>
   <input id="pdf" name="pdf" type="file"
-         accept="application/pdf,.pdf,message/rfc822,.eml" required>
+         accept="{{ upload_accept }}" required>
   {% endif %}
 
   <label for="task">Task</label>
@@ -198,6 +198,24 @@
       {% endif %}
     </div>
   </details>
+
+  {% if picker %}
+  <div class="field">
+    <label>AI model for this task</label>
+    {% set chosen = task_model %}
+    {% set picker_id = 'taskmodel' %}
+    {% include "_model_picker.html" %}
+    <div class="hint">
+      Saved for this task and used next time. Recommended models are starred.
+    </div>
+    <div class="banner warn" id="exh-model-warn" hidden style="margin-top:8px;">
+      <strong>Exhaustive mode always uses <code>{{ exhaustive_model }}</code></strong>,
+      whatever you choose here. Weaker models silently omit events, which
+      defeats the point of reading every page. Documented in the v1.0.3
+      release notes.
+    </div>
+  </div>
+  {% endif %}
 
   <div class="exh-note" id="exh-note" hidden>
     <strong>Exhaustive mode</strong> reads every passage of every selected file
@@ -372,10 +390,19 @@
       return null;
     }
 
+    var exhModelWarn = document.getElementById("exh-model-warn");
+    var taskModelSelect = document.querySelector(
+      ".model-picker[data-picker='taskmodel'] .model-select");
+    var EXHAUSTIVE_MODEL = {{ exhaustive_model | tojson }};
+
     function updateExhaustiveNote() {
       var v = exhaustiveSelected();
       if (exhNote) exhNote.hidden = !v;
       if (exhPreview) exhPreview.hidden = !(v && v.indexOf("preview") !== -1);
+      if (exhModelWarn) {
+        var chosen = taskModelSelect ? taskModelSelect.value : "";
+        exhModelWarn.hidden = !(v && chosen && chosen !== EXHAUSTIVE_MODEL);
+      }
     }
 
     groups.forEach(function (g) {
@@ -385,6 +412,9 @@
         });
     });
     taskSelect.addEventListener("change", updateExhaustiveNote);
+    if (taskModelSelect) {
+      taskModelSelect.addEventListener("change", updateExhaustiveNote);
+    }
     updateExhaustiveNote();
 
     var confirmed = false;

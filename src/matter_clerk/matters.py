@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
 from .paths import data_path
+
+log = logging.getLogger("matter_clerk.matters")
 
 # --------------------------------------------------------------------------
 # Matter persistence (Day 4a).
@@ -111,6 +114,7 @@ class Matter:
     created_at: str
     modified_at: str
     last_queried_at: str | None
+    deleted_at: str | None = None
     file_count: int = 0  # populated by list_matters / get_matter
 
 
@@ -127,6 +131,8 @@ class MatterFile:
     ingest_error: str | None
     ingested_at: str | None
     created_at: str
+    # Session 10: NULL means live.
+    deleted_at: str | None = None
 
 
 # --------------------------------------------------------------------------
@@ -185,11 +191,39 @@ def connect() -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """Create tables/indices if absent and stamp user_version once."""
+    """Create tables/indices if absent, apply column migrations, stamp version."""
     conn.executescript(_SCHEMA)
+    _migrate_soft_delete(conn)
     if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(r["name"] == column
+               for r in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def _migrate_soft_delete(conn: sqlite3.Connection) -> None:
+    """Add deleted_at to matters and files (Session 10).
+
+    SQLite has no `ADD COLUMN IF NOT EXISTS`, so existence is checked first --
+    init_db runs on EVERY connect(), and a migration that raises the second
+    time it runs would brick the application on its second request. Session 6a
+    established that a migration must never turn a working install into a dead
+    one; this one is idempotent by construction.
+
+    ADD COLUMN is metadata-only in SQLite: no table rewrite, and every existing
+    row reads NULL, which is exactly "not deleted".
+    """
+    for table in ("matters", "files"):
+        if not _has_column(conn, table, "deleted_at"):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN deleted_at TEXT")
+            log.info(f"migration: added {table}.deleted_at")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_files_deleted ON files(deleted_at)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_matters_deleted ON matters(deleted_at)")
 
 
 # --------------------------------------------------------------------------
@@ -219,7 +253,7 @@ def get_matter(conn: sqlite3.Connection, matter_id: int) -> Matter:
         """
         SELECT m.*, COUNT(f.id) AS file_count
         FROM matters m
-        LEFT JOIN files f ON f.matter_id = m.id
+        LEFT JOIN files f ON f.matter_id = m.id AND f.deleted_at IS NULL
         WHERE m.id = ?
         GROUP BY m.id
         """,
@@ -235,7 +269,7 @@ def get_matter_by_name(conn: sqlite3.Connection, name: str) -> Matter | None:
         """
         SELECT m.*, COUNT(f.id) AS file_count
         FROM matters m
-        LEFT JOIN files f ON f.matter_id = m.id
+        LEFT JOIN files f ON f.matter_id = m.id AND f.deleted_at IS NULL
         WHERE m.name = ?
         GROUP BY m.id
         """,
@@ -250,7 +284,8 @@ def list_matters(conn: sqlite3.Connection) -> list[Matter]:
         """
         SELECT m.*, COUNT(f.id) AS file_count
         FROM matters m
-        LEFT JOIN files f ON f.matter_id = m.id
+        LEFT JOIN files f ON f.matter_id = m.id AND f.deleted_at IS NULL
+        WHERE m.deleted_at IS NULL
         GROUP BY m.id
         ORDER BY COALESCE(m.last_queried_at, m.created_at) DESC
         """
@@ -322,6 +357,9 @@ STATUS_LABELS = {
     "ingested": "Ready",
     "ocr_low_quality": "Poor scan quality",
     "failed_no_text": "No readable text",
+    # Session 9. Separate from "failed" because the remedy is specific and the
+    # lawyer can act on it: remove the password and re-upload.
+    "password_protected": "Password protected",
     "failed": "Ingest failed",
     "pending": "Not yet processed",
 }
@@ -343,6 +381,19 @@ def mark_file_ingested(
         "UPDATE files SET ingest_status = ?, ingested_at = ?, "
         "ingest_error = ? WHERE id = ?",
         (status, _now(), (note or None), file_id),
+    )
+    conn.commit()
+
+
+def mark_file_password_protected(
+    conn: sqlite3.Connection, file_id: int, note: str
+) -> None:
+    """Mark a file as encrypted. Not queryable, but distinct from a failure:
+    the file is fine, we just cannot open it, and the user can fix that."""
+    conn.execute(
+        "UPDATE files SET ingest_status = 'password_protected', "
+        "ingest_error = ? WHERE id = ?",
+        (note[:2000], file_id),
     )
     conn.commit()
 
@@ -379,7 +430,8 @@ def mark_file_failed(conn: sqlite3.Connection, file_id: int, error: str) -> None
 
 def list_files(conn: sqlite3.Connection, matter_id: int) -> list[MatterFile]:
     rows = conn.execute(
-        "SELECT * FROM files WHERE matter_id = ? ORDER BY created_at, id",
+        "SELECT * FROM files WHERE matter_id = ? AND deleted_at IS NULL "
+        "ORDER BY created_at, id",
         (matter_id,),
     ).fetchall()
     return [_file_from_row(r) for r in rows]
@@ -407,6 +459,14 @@ def get_file_in_matter(
 # --------------------------------------------------------------------------
 # Row mappers
 # --------------------------------------------------------------------------
+def _col(row, name):
+    """Read a column that may be absent on a row from an older query."""
+    try:
+        return row[name]
+    except (IndexError, KeyError):
+        return None
+
+
 def _matter_from_row(row: sqlite3.Row) -> Matter:
     return Matter(
         id=row["id"],
@@ -415,6 +475,7 @@ def _matter_from_row(row: sqlite3.Row) -> Matter:
         created_at=row["created_at"],
         modified_at=row["modified_at"],
         last_queried_at=row["last_queried_at"],
+        deleted_at=_col(row, "deleted_at"),
         file_count=row["file_count"] if "file_count" in row.keys() else 0,
     )
 
@@ -425,6 +486,7 @@ def _file_from_row(row: sqlite3.Row) -> MatterFile:
         matter_id=row["matter_id"],
         filename=row["filename"],
         file_type=row["file_type"],
+        deleted_at=_col(row, "deleted_at"),
         content_sha256=row["content_sha256"],
         collection=row["collection"],
         stored_path=row["stored_path"],
@@ -567,3 +629,166 @@ def sort_files(files: list[MatterFile], order: str = DEFAULT_SORT) -> list[Matte
     dated.sort(key=lambda t: (t[0], t[1], t[2]), reverse=(order == "newest"))
     undated.sort(key=lambda t: (t[0], t[1]))
     return [t[-1] for t in dated] + [t[-1] for t in undated]
+
+
+# --------------------------------------------------------------------------
+# Soft delete (Session 10)
+#
+# `deleted_at` NULL means live. A soft-deleted row keeps its Chroma collection
+# and its file on disk, because restoring is meant to be free -- re-ingesting a
+# 500-page scan to undo a mis-click would not be a recovery window, it would be
+# a punishment.
+#
+# The two UNIQUE constraints on these tables interact with soft delete, and the
+# right answer differs by level:
+#   files:   UNIQUE (matter_id, content_sha256) -- re-uploading a soft-deleted
+#            file RESTORES it. The lawyer's intent is unambiguous, and refusing
+#            as a "duplicate" for a file they cannot see is user-hostile.
+#   matters: name UNIQUE -- reusing a deleted matter's name REFUSES with a
+#            pointer to Deleted items. Auto-restoring an entire matter is too
+#            much action for too small a gesture.
+# --------------------------------------------------------------------------
+RECOVERY_WINDOW_DAYS = 30
+
+
+def soft_delete_file(conn: sqlite3.Connection, file_id: int) -> None:
+    conn.execute("UPDATE files SET deleted_at = ? WHERE id = ?", (_now(), file_id))
+    conn.commit()
+
+
+def restore_file(conn: sqlite3.Connection, file_id: int) -> None:
+    conn.execute("UPDATE files SET deleted_at = NULL WHERE id = ?", (file_id,))
+    conn.commit()
+
+
+def soft_delete_matter(conn: sqlite3.Connection, matter_id: int) -> None:
+    """Soft-delete a matter. Its files stay individually live so that restoring
+    the matter brings back exactly what was there, including any files the
+    lawyer had already deleted separately (those keep their own deleted_at)."""
+    conn.execute("UPDATE matters SET deleted_at = ? WHERE id = ?",
+                 (_now(), matter_id))
+    conn.commit()
+
+
+def restore_matter(conn: sqlite3.Connection, matter_id: int) -> None:
+    conn.execute("UPDATE matters SET deleted_at = NULL WHERE id = ?", (matter_id,))
+    conn.commit()
+
+
+def get_file_any(conn: sqlite3.Connection, file_id: int) -> MatterFile | None:
+    """A file whether or not it is soft-deleted. For restore and purge."""
+    row = conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
+    return _file_from_row(row) if row else None
+
+
+def get_matter_any(conn: sqlite3.Connection, matter_id: int) -> Matter | None:
+    """A matter whether or not it is soft-deleted.
+
+    Used by result pages, which must render "this matter has been deleted"
+    rather than a 404 when a lawyer follows a link to work they still own.
+    """
+    row = conn.execute(
+        """
+        SELECT m.*, COUNT(f.id) AS file_count
+        FROM matters m
+        LEFT JOIN files f ON f.matter_id = m.id AND f.deleted_at IS NULL
+        WHERE m.id = ?
+        GROUP BY m.id
+        """,
+        (matter_id,),
+    ).fetchone()
+    return _matter_from_row(row) if row else None
+
+
+def find_deleted_file_by_hash(
+    conn: sqlite3.Connection, matter_id: int, content_sha256: str
+) -> MatterFile | None:
+    """The soft-deleted row blocking a re-upload of this content, if any."""
+    row = conn.execute(
+        "SELECT * FROM files WHERE matter_id = ? AND content_sha256 = ? "
+        "AND deleted_at IS NOT NULL",
+        (matter_id, content_sha256),
+    ).fetchone()
+    return _file_from_row(row) if row else None
+
+
+def deleted_matter_named(conn: sqlite3.Connection, name: str) -> Matter | None:
+    row = conn.execute(
+        """
+        SELECT m.*, 0 AS file_count FROM matters m
+        WHERE m.name = ? AND m.deleted_at IS NOT NULL
+        """,
+        (name.strip(),),
+    ).fetchone()
+    return _matter_from_row(row) if row else None
+
+
+def list_deleted(conn: sqlite3.Connection) -> tuple[list[Matter], list[dict]]:
+    """Everything in the recovery window, newest deletion first."""
+    matters_rows = conn.execute(
+        """
+        SELECT m.*, COUNT(f.id) AS file_count
+        FROM matters m
+        LEFT JOIN files f ON f.matter_id = m.id AND f.deleted_at IS NULL
+        WHERE m.deleted_at IS NOT NULL
+        GROUP BY m.id
+        ORDER BY m.deleted_at DESC
+        """
+    ).fetchall()
+    file_rows = conn.execute(
+        """
+        SELECT f.*, m.name AS matter_name, m.deleted_at AS matter_deleted_at
+        FROM files f JOIN matters m ON m.id = f.matter_id
+        WHERE f.deleted_at IS NOT NULL
+        ORDER BY f.deleted_at DESC
+        """
+    ).fetchall()
+    files = []
+    for r in file_rows:
+        files.append({
+            "file": _file_from_row(r),
+            "matter_name": r["matter_name"],
+            "matter_deleted": r["matter_deleted_at"] is not None,
+        })
+    return [_matter_from_row(r) for r in matters_rows], files
+
+
+def days_remaining(deleted_at: str | None) -> int:
+    """Whole days left before permanent deletion. 0 means due now."""
+    if not deleted_at:
+        return RECOVERY_WINDOW_DAYS
+    try:
+        when = dt.datetime.fromisoformat(deleted_at)
+    except ValueError:
+        return RECOVERY_WINDOW_DAYS
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=dt.timezone.utc)
+    age = dt.datetime.now(dt.timezone.utc) - when
+    return max(0, RECOVERY_WINDOW_DAYS - age.days)
+
+
+def due_for_purge(conn: sqlite3.Connection, limit: int = 25) -> tuple[list, list]:
+    """Rows whose recovery window has expired. Bounded so a large backlog is
+    cleared across several launches rather than in one long pass."""
+    cutoff = (dt.datetime.now(dt.timezone.utc)
+              - dt.timedelta(days=RECOVERY_WINDOW_DAYS)).isoformat()
+    files = conn.execute(
+        "SELECT * FROM files WHERE deleted_at IS NOT NULL AND deleted_at < ? "
+        "LIMIT ?", (cutoff, limit),
+    ).fetchall()
+    matters_ = conn.execute(
+        "SELECT * FROM matters WHERE deleted_at IS NOT NULL AND deleted_at < ? "
+        "LIMIT ?", (cutoff, limit),
+    ).fetchall()
+    return [dict(r) for r in files], [dict(r) for r in matters_]
+
+
+def hard_delete_file(conn: sqlite3.Connection, file_id: int) -> None:
+    conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
+    conn.commit()
+
+
+def hard_delete_matter(conn: sqlite3.Connection, matter_id: int) -> None:
+    conn.execute("DELETE FROM files WHERE matter_id = ?", (matter_id,))
+    conn.execute("DELETE FROM matters WHERE id = ?", (matter_id,))
+    conn.commit()

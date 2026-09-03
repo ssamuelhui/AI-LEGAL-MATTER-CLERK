@@ -152,7 +152,7 @@ def _add_file_to_matter(conn, matter: matters.Matter, file_path: Path) -> matter
         )
 
     sha = file_hash(file_path)
-    file_type = "eml" if suffix == ".eml" else "pdf"
+    file_type = suffix.lstrip(".")
     coll = matters.collection_name(matter.id, sha)
     stored = matters.stored_path_for(matter.id, sha, suffix)
 

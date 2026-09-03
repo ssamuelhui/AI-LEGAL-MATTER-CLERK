@@ -70,6 +70,27 @@
     .exh-note  { font-size: 12px; color: #6a4a00; background: #fff8e1;
                  border: 1px solid #f0d488; border-radius: 4px;
                  padding: 8px 10px; margin-top: 8px; }
+    .btn-danger { background: #a40e26; color: #fff; border: 1px solid #7d0a1d; }
+    .btn-danger:hover { background: #8a0c20; }
+    .btn-danger:disabled { background: #d9a3ac; border-color: #d9a3ac; cursor: not-allowed; }
+    .danger-zone { border: 1px solid #f0c4cc; border-radius: 4px; padding: 14px 16px;
+                   background: #fffafa; }
+    .danger-zone > h2 { color: #8a1f1f; }
+    .confirm-name { background: #f2f2f2; padding: 1px 6px; border-radius: 3px;
+                    user-select: all; }
+    .file-actions { display: flex; gap: 6px; }
+    .expiring { color: #a40e26; font-weight: 600; }
+    .key-row { border-top: 1px solid #eee; padding: 12px 0; }
+    .key-head { display: flex; align-items: center; gap: 10px; }
+    .key-mask { background: #f2f2f2; padding: 1px 6px; border-radius: 3px;
+                font-size: 12px; }
+    .key-form { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+    .key-form input[type=password], .key-form input[type=text] { width: 340px; margin: 0; }
+    .model-picker { min-width: 320px; }
+    .model-search { width: 100%; margin: 0 0 4px; font-size: 12px; padding: 4px 6px; }
+    .model-select { width: 100%; margin: 0; font-size: 12px; }
+    .model-note { margin-top: 4px; }
+    .model-form { display: flex; flex-direction: column; margin: 0; }
     .support-line { margin-top: 40px; padding-top: 12px; border-top: 1px solid #eee; }
     .support-line form { margin: 0; }
     .linklike { background: none; border: 0; padding: 0; color: #667;
@@ -172,6 +193,80 @@
     </div>
   </div>
   {% endif %}
+
+
+<script>
+  // Searchable model picker (Session 10).
+  //
+  // Enhancement only. The <select> is rendered server-side with every option
+  // and works completely without this script -- it is just long. If this
+  // throws, a lawyer still has a working native dropdown, which is the lesson
+  // from Session 8, where one stray newline in an inline script killed every
+  // JS-driven control on the form.
+  //
+  // No library: the application is offline-capable by design and a CDN widget
+  // would silently never initialise on a disconnected laptop.
+  (function () {
+    var pickers = document.querySelectorAll(".model-picker");
+    if (!pickers.length) return;
+
+    pickers.forEach(function (picker) {
+      var search = picker.querySelector(".model-search");
+      var select = picker.querySelector(".model-select");
+      var note = picker.querySelector(".model-note");
+      if (!search || !select) return;
+
+      // Revealed only once the script is alive, so it can never appear as a
+      // dead control next to a working select.
+      search.hidden = false;
+
+      var all = Array.prototype.slice.call(select.options).map(function (o) {
+        return {
+          el: o,
+          hay: (o.value + " " + (o.dataset.name || "") + " " +
+                (o.dataset.provider || "")).toLowerCase()
+        };
+      });
+
+      function filter() {
+        // Every space-separated term must appear somewhere in id, name or
+        // provider -- so "opus 4.7" and "anthropic opus" both work.
+        var terms = search.value.toLowerCase().split(/\s+/)
+                      .filter(function (t) { return t; });
+        var shown = 0;
+        all.forEach(function (item) {
+          var ok = terms.every(function (t) { return item.hay.indexOf(t) !== -1; });
+          // Never hide the current selection: hiding a selected option makes
+          // the control display nothing.
+          if (item.el.selected) ok = true;
+          item.el.hidden = !ok;
+          if (ok) shown++;
+        });
+        search.setAttribute("aria-label",
+          shown + " of " + all.length + " models match");
+      }
+
+      function updateNote() {
+        var opt = select.options[select.selectedIndex];
+        if (!opt || !note) return;
+        var recommended = opt.dataset.recommended === "1";
+        note.hidden = recommended;
+        if (!recommended) {
+          note.textContent = "This model is not tested with Matter Clerk" +
+            " tasks. Output quality may vary \u2014 try a recommended model" +
+            " first.";
+        }
+      }
+
+      search.addEventListener("input", filter);
+      search.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") { search.value = ""; filter(); }
+      });
+      select.addEventListener("change", updateNote);
+      updateNote();
+    });
+  })();
+</script>
 
   {% block content %}{% endblock %}
 </body>

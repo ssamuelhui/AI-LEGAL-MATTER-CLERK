@@ -54,6 +54,9 @@ last queried: {{ matter.last_queried_at or "never" }}</div>
           {% elif f.ingest_status == 'failed_no_text' %}
             <span class="badge badge-bad">No readable text</span>
             <div class="meta">{{ f.ingest_error or 'Nothing searchable could be extracted. This file is not being used to answer questions.' }}</div>
+          {% elif f.ingest_status == 'password_protected' %}
+            <span class="badge badge-bad">Password protected</span>
+            <div class="meta">{{ f.ingest_error or 'Matter Clerk cannot open this file. Remove the password, save a copy, and upload that.' }}</div>
           {% elif f.ingest_status == 'failed' %}
             <span class="badge badge-bad">Ingest failed</span>
             {% if f.ingest_error %}<div class="meta">{{ f.ingest_error }}</div>{% endif %}
@@ -62,13 +65,18 @@ last queried: {{ matter.last_queried_at or "never" }}</div>
           {% endif %}
         </td>
         <td>{{ f.ingested_at[:10] if f.ingested_at else "-" }}</td>
-        <td>
+        <td class="file-actions">
           {% if f.ingest_status != 'ingested' %}
           <form method="post" style="margin:0"
                 action="{{ url_for('reingest_file', matter_id=matter.id, file_id=f.id) }}">
             <button type="submit" class="btn-small">Re-process</button>
           </form>
           {% endif %}
+          <form method="post" style="margin:0"
+                action="{{ url_for('delete_file', matter_id=matter.id, file_id=f.id) }}"
+                onsubmit="return confirm('Delete this file? You can restore it within 30 days.');">
+            <button type="submit" class="btn-small btn-danger" title="Delete this file">Delete</button>
+          </form>
         </td>
       </tr>
       {% endfor %}
@@ -101,9 +109,9 @@ last queried: {{ matter.last_queried_at or "never" }}</div>
   <h2>Add files</h2>
   <form method="post" action="{{ url_for('matter_upload', matter_id=matter.id) }}"
         enctype="multipart/form-data" id="uploadform">
-    <label for="files">PDF or email (.eml) &mdash; select one or more</label>
+    <label for="files">PDF, Word (.docx), Excel (.xlsx) or email (.eml) &mdash; select one or more</label>
     <input id="files" name="files" type="file" multiple
-           accept="application/pdf,.pdf,message/rfc822,.eml" required>
+           accept="{{ upload_accept }}" required>
     <button type="submit" id="uploadbtn">Add files</button>
   </form>
   <script>
@@ -135,4 +143,42 @@ last queried: {{ matter.last_queried_at or "never" }}</div>
   .status-failed { color: #8a1f1f; }
   .status-pending { color: #6a4a00; }
 </style>
+
+<section class="block danger-zone">
+  <h2>Delete this matter</h2>
+  <p class="sub">
+    The matter and its files are hidden immediately and removed permanently
+    after 30 days. Until then you can restore everything from
+    <a href="{{ url_for('deleted_items') }}">Deleted items</a>. Your original
+    documents on disk are not touched.
+  </p>
+  <form method="post" action="{{ url_for('delete_matter', matter_id=matter.id) }}"
+        id="deleteform">
+    <label for="confirm_name">
+      Type the matter name to confirm:
+      <code class="confirm-name">{{ matter.name }}</code>
+    </label>
+    <input type="text" id="confirm_name" name="confirm_name" autocomplete="off"
+           spellcheck="false" placeholder="Matter name">
+    <button type="submit" class="btn-danger" id="deletebtn" disabled>
+      Delete matter
+    </button>
+  </form>
+</section>
+
+<script>
+  (function () {
+    // Enabling the button is a convenience only; the server compares the typed
+    // name again before deleting anything. A client-only gate on an
+    // irreversible action is not a gate.
+    var want = {{ matter.name | tojson }};
+    var input = document.getElementById("confirm_name");
+    var btn = document.getElementById("deletebtn");
+    if (!input || !btn) return;
+    input.addEventListener("input", function () {
+      btn.disabled = input.value.trim() !== want.trim();
+    });
+  })();
+</script>
+
 {% endblock %}

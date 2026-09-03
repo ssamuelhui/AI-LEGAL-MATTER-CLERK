@@ -615,3 +615,133 @@ not abort the run.
 Exact repeats **within one file** are collapsed (chunk-overlap artefacts).
 Cross-file duplicates are deliberately preserved — see ARCHITECTURE. The run
 summary always states the count, including when it is zero.
+
+---
+
+## 19. Word and Excel ingestion (v1.0.4)
+
+Four formats are accepted: `.pdf`, `.eml`, `.docx`, `.xlsx`. The list lives in
+`web.SUPPORTED_SUFFIXES`, with the matching `accept` attribute in
+`web.UPLOAD_ACCEPT`, so the upload validation and the file picker cannot drift.
+
+No new dependencies — `python-docx` and `openpyxl` were already present for the
+exporters.
+
+### Word (`ingest_docx.py`)
+
+Body XML is walked in document order (not `document.paragraphs` then
+`document.tables`, which loses interleaving). Blocks are packed to ~700 tokens
+without crossing a heading or table boundary.
+
+**Tracked changes:** text is read by walking `w:t` descendants and skipping
+`w:delText`, giving the all-changes-accepted view. `Paragraph.text` cannot be
+used — it drops tracked *insertions*, because inserted runs are not direct
+children of `<w:p>`. See ARCHITECTURE; guarded by a test.
+
+Comments are excluded for free: they live in `word/comments.xml` and never
+appear in paragraph text. Footnotes are not extracted — see BACKLOG.
+
+Locators: `§<heading>`, `§<heading> (part 2 of 3)`, `Table 3 "caption", rows
+4-9`, or `¶N` where a document has no headings.
+
+### Excel (`ingest_xlsx.py`)
+
+Per sheet: score the first 10 rows to find the header (it is **not** always row
+1), drop columns that are empty across the whole sheet, skip empty rows, and
+pack remaining rows to ~700 tokens — about 8-11 rows in practice, not the 50
+that would produce 3,800-token chunks.
+
+The header line is repeated at the top of every chunk. This is load-bearing for
+Session 8's exhaustive Timeline, which needs to know which column holds dates.
+
+Cells contribute computed values (`data_only=True`). Whether the workbook
+contains formulas is recorded as audit metadata via a second read.
+
+Locator: `sheet 'Name', rows 15-24 (cols: A | B | C | D | E ...)` with real
+1-based Excel row numbers.
+
+### Statuses
+
+Adds `password_protected` to the Session 6a vocabulary — not queryable, and
+distinct from `failed` because the remedy is specific. Encryption is detected
+by the OLE2 file signature (`D0 CF 11 E0 A1 B1 1A E1`), since python-docx and
+openpyxl raise the same exception for encrypted and corrupt files alike.
+
+A workbook whose formulas have no cached values gets its own message: open and
+save it in Excel.
+
+### Regression
+
+`verify_docx_xlsx_ingestion.py` pins SHA-256 digests of the chunk lists for all
+nine test-matter PDFs, captured before Session 9. PDF and EML ingestion is
+byte-identical or the suite fails.
+
+---
+
+## 20. Soft delete, model selection and API keys (v1.0.5)
+
+### Soft delete
+
+`deleted_at TEXT` on `matters` and `files`; NULL means live. Added by an
+idempotent migration in `init_db()`, which runs on every `connect()` — so it
+checks `PRAGMA table_info` first. `ADD COLUMN` is metadata-only; no rewrite.
+
+30-day window. Chroma collections and stored files are preserved throughout, so
+restore is instant. `/deleted` lists everything with days remaining; linked from
+the matters-page footer and from Settings.
+
+Two constraint interactions, resolved asymmetrically:
+
+| Constraint | Behaviour |
+|---|---|
+| `files UNIQUE (matter_id, content_sha256)` | Re-uploading a soft-deleted file **restores** it |
+| `matters.name UNIQUE` | Reusing a deleted matter's name **refuses**, pointing at `/deleted` |
+
+Matter deletion requires typing the exact name, case-sensitive after trimming.
+Checked client-side to enable the button and **again server-side** before
+anything is deleted.
+
+Permanent deletion runs on a daemon thread after the server is listening
+(`maintenance.start_purge_in_background()`), 25 items per launch, wrapped so it
+can never affect startup. If the vector store will not open, rows are left
+alone rather than orphaning their collections.
+
+### Model selection
+
+`model_registry.py`. Catalogue from OpenRouter's `/api/v1/models`, cached at
+`<data_dir>/model_list_cache.json` for 24 hours; a stale cache is served
+immediately while a background refresh runs. Total failure degrades to three
+hard-coded recommended models with a banner — never an empty picker.
+
+```
+RECOMMENDED_MODELS = xiaomi/mimo-v2.5-pro
+                     anthropic/claude-opus-4.7      # DOTS, not dashes
+                     anthropic/claude-sonnet-5
+```
+
+Tiers from the measured distribution across 425 models: `$` ≤ $2.25 (p50),
+`$$` ≤ $17.50 (p90), `$$$` above. Re-derive if the catalogue shifts materially.
+
+Preferences per task in `<data_dir>/user_preferences.json`. Corrupt JSON is
+logged and ignored, never deleted. A preference naming a vanished model warns
+once and is rewritten to the default — but a *degraded* catalogue never
+triggers that, so an outage cannot discard good preferences.
+
+The picker is a server-rendered `<select>` with search layered on by inline JS.
+No CDN library: the application is offline-capable and a fetched widget would
+silently fail on a disconnected laptop. With JS disabled the native dropdown
+still works.
+
+Exhaustive mode remains pinned to `anthropic/claude-opus-4.7` regardless of
+selection. The result page and audit log both carry `model_requested`,
+`model_used` and `model_coerced`.
+
+### API keys
+
+Settings → API keys, both OpenRouter and CanLII. Tested against the live
+service before saving, using the first-run wizard's endpoints. Written to the
+data directory's `.env` and to `os.environ` (python-dotenv does not override
+already-set variables).
+
+Masks hide length as well as value. No key material — and no key length —
+reaches any log. A running task finishes on the key it started with.

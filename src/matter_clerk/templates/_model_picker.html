@@ -1,0 +1,39 @@
+{# Searchable model picker (Session 10).                                       #}
+{#                                                                             #}
+{# PROGRESSIVE ENHANCEMENT IS THE POINT. The submitted control is a real       #}
+{# <select name="model"> holding every option, rendered server-side. With no   #}
+{# JavaScript at all it is a long but perfectly working native dropdown, which #}
+{# is keyboard- and screen-reader-operable for free. The search box below is   #}
+{# layered on top and only filters <option> elements.                          #}
+{#                                                                             #}
+{# That structure is a direct lesson from Session 8, where one stray newline   #}
+{# in an inline script killed every JS-driven control on the task form. A      #}
+{# model picker that vanishes when a script throws would leave a lawyer unable #}
+{# to run anything.                                                            #}
+{#                                                                             #}
+{# No library. This application is offline-capable by design -- bundled model, #}
+{# bundled OCR binaries, verified running with all outbound HTTP blackholed -- #}
+{# and a CDN dropdown would silently never initialise on a disconnected        #}
+{# laptop.                                                                     #}
+{#                                                                             #}
+{# Caller supplies: picker (sorted models), chosen (model id), and optionally  #}
+{# picker_id for uniqueness when several appear on one page.                   #}
+
+{% set pid = picker_id | default(t.id if t is defined else 'model') %}
+<div class="model-picker" data-picker="{{ pid }}">
+  <input type="search" class="model-search" placeholder="Search models&hellip;"
+         aria-label="Search models" autocomplete="off" spellcheck="false"
+         hidden>
+  <select name="model" class="model-select" aria-label="AI model">
+    {% for m in picker %}
+    <option value="{{ m.id }}"
+            data-recommended="{{ '1' if m.recommended else '0' }}"
+            data-provider="{{ m.provider }}"
+            data-name="{{ m.name }}"
+            {% if m.id == chosen %}selected{% endif %}>
+      {{ '* ' if m.recommended else '' }}{{ m.name }} ({{ m.provider }}) {{ m.tier }}
+    </option>
+    {% endfor %}
+  </select>
+  <div class="model-note hint" hidden></div>
+</div>

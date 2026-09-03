@@ -119,8 +119,13 @@
 <div class="banner info">
   <strong>Exhaustive analysis.</strong>
   Read every passage of {{ run_state.files_total }} file(s) in
-  {{ run_state.batches or 1 }} model call(s), using
-  <code>{{ run_state.model }}</code>.
+  {{ run_state.batches or 1 }} model call(s).
+  {% if run_state.model_requested and run_state.model_requested != run_state.model %}
+  Model requested: <code>{{ run_state.model_requested }}</code>.
+  <strong>Model used: <code>{{ run_state.model }}</code></strong> (exhaustive mode).
+  {% else %}
+  Model used: <code>{{ run_state.model }}</code>.
+  {% endif %}
   <div class="metadata" style="margin-top:6px;">
     {{ run_state.prompt_tokens|int }} tokens in &middot;
     {{ run_state.completion_tokens|int }} tokens out &middot;

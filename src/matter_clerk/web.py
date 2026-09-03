@@ -25,8 +25,9 @@ from flask import (
 from werkzeug.serving import make_server
 
 from . import (
-    audit, canlii, citations, discovery, exhaustive, export, llm, maintenance,
-    matters, pipeline, pleadings, runs, updater,
+    audit, canlii, citations, discovery, exhaustive, export, first_run_wizard,
+    ingest_docx, ingest_xlsx, llm, maintenance, matters, model_registry,
+    pipeline, pleadings, runs, updater,
 )
 from .prompts import (
     DEFAULT_TASK,
@@ -106,6 +107,15 @@ def _store_ok() -> tuple[bool, str | None]:
 # modes -- all / selected / single -- were previously two separate controls
 # that could contradict each other, with the server silently preferring one.
 # --------------------------------------------------------------------------
+# Session 9: Word and Excel join PDF and email. One tuple, so the upload
+# validation, the accept attribute and the CLI cannot drift apart.
+SUPPORTED_SUFFIXES = (".pdf", ".eml", ".docx", ".xlsx")
+UPLOAD_ACCEPT = (
+    "application/pdf,.pdf,message/rfc822,.eml,"
+    ".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,"
+    ".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
 SCOPE_ALL = "all"
 SCOPE_SELECTED = "selected"
 SCOPE_SINGLE = "single"
@@ -134,6 +144,9 @@ def _matter_files_for_selection(files) -> list[dict]:
         elif f.ingest_status == "ocr_low_quality":
             badge_class = "badge-warn"
             note = "answers from this file may be thin"
+        elif f.ingest_status == "password_protected":
+            badge_class = "badge-bad"
+            note = "remove the password and re-upload"
         else:
             badge_class = "badge-bad"
             note = "cannot be searched — needs re-processing"
@@ -218,6 +231,63 @@ def build_system_prompt_for(template, form):
     )
 
 
+def _task_picker():
+    """Sorted model list for the task form. Never raises and never blocks:
+    a failed fetch degrades to the three recommended models."""
+    try:
+        return model_registry.sort_for_picker(
+            list(model_registry.available_models()["models"])
+        )
+    except Exception:                                             # noqa: BLE001
+        return model_registry.sort_for_picker(model_registry._fallback_models())
+
+
+def _task_model(task: str) -> str:
+    model_id, _warning = model_registry.resolve_model(task)
+    return model_id
+
+
+def _mask_key(value: str | None) -> str:
+    """Show enough to recognise a key, never enough to use or size it.
+
+    A fixed number of dots rather than one per hidden character: the length of
+    an API key is itself information, and this string is rendered on a page
+    that may be screenshotted into a support thread.
+    """
+    if not value:
+        return ""
+    value = value.strip()
+    if len(value) <= 12:
+        return "\u2022" * 8
+    return value[:8] + "\u2026" + "\u2022" * 8 + "\u2026" + value[-4:]
+
+
+def _update_env_var(key: str, value: str) -> None:
+    """Rewrite one variable in the data directory .env, then in this process.
+
+    os.environ is set explicitly because python-dotenv does not override
+    variables that are already set, so rewriting the file alone would leave the
+    old key live for the rest of the session.
+    """
+    path = first_run_wizard.env_path()
+    lines: list[str] = []
+    if path.is_file():
+        lines = path.read_text(encoding="utf-8").splitlines()
+    out, replaced = [], False
+    for line in lines:
+        if line.strip().startswith(key + "="):
+            out.append(key + "=" + value)
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        out.append(key + "=" + value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    first_run_wizard._restrict_to_current_user(path)
+    os.environ[key] = value
+
+
 def prompts_exhaustive_tasks():
     from .prompts import EXHAUSTIVE_TASKS
 
@@ -258,6 +328,11 @@ def _start_exhaustive(state, scope_files, task, structured_inputs, matter_id):
             "matter_query",
             matter_id=matter_id, task=task, mode=st.mode,
             exhaustive=True, model=st.model, run_id=st.run_id,
+            model_requested=st.model_requested or st.model,
+            model_used=st.model,
+            # A separate boolean rather than something a later auditor has to
+            # reconstruct by comparing two strings.
+            model_coerced=bool(st.model_requested and st.model_requested != st.model),
             batches=st.batches, chunks_processed=result.top_k,
             prompt_tokens=st.prompt_tokens, completion_tokens=st.completion_tokens,
             cost_usd=st.cost_usd, seconds=st.seconds,
@@ -490,10 +565,13 @@ def create_app() -> Flask:
                 else:
                     matters.mark_file_ingested(conn, file_id)
                     flash(f"Re-processed {mf.filename}.", "ok")
+            except (ingest_docx.DocxPasswordProtected,
+                    ingest_xlsx.XlsxPasswordProtected) as e:
+                matters.mark_file_password_protected(conn, file_id, str(e))
+                flash(str(e), "warn")
             except pipeline.PdfHasNoText as e:
                 matters.mark_file_no_text(conn, file_id, str(e))
-                flash(f"{mf.filename}: still no readable text. A clearer scan "
-                      f"is needed.", "warn")
+                flash(f"{mf.filename}: {e}", "warn")
             except Exception as e:                                # noqa: BLE001
                 matters.mark_file_failed(conn, file_id, str(e))
                 flash(f"{mf.filename}: re-processing failed: {e}", "error")
@@ -593,6 +671,161 @@ def create_app() -> Flask:
         est["cost_high"] = round(est["cost_high"], 2)
         return est
 
+    # ----------------------------------------------------------------------
+    # Soft delete, restore and the Deleted items view (Session 10)
+    # ----------------------------------------------------------------------
+    @app.post("/matters/<int:matter_id>/files/<int:file_id>/delete")
+    def delete_file(matter_id: int, file_id: int):
+        conn = matters.connect()
+        try:
+            mf = matters.get_file(conn, file_id)
+            if mf is None or mf.matter_id != matter_id:
+                abort(404)
+            matters.soft_delete_file(conn, file_id)
+            audit.log_event("file_deleted", matter_id=matter_id, file_id=file_id,
+                            filename=mf.filename, soft=True,
+                            recovery_days=matters.RECOVERY_WINDOW_DAYS)
+            flash("Deleted " + mf.filename + ". You can restore it for "
+                  + str(matters.RECOVERY_WINDOW_DAYS) + " days.", "ok")
+        finally:
+            conn.close()
+        return redirect(url_for("matter_detail", matter_id=matter_id))
+
+    @app.post("/deleted/files/<int:file_id>/restore")
+    def restore_file(file_id: int):
+        conn = matters.connect()
+        try:
+            mf = matters.get_file_any(conn, file_id)
+            if mf is None:
+                abort(404)
+            matters.restore_file(conn, file_id)
+            audit.log_event("file_restored", matter_id=mf.matter_id,
+                            file_id=file_id, filename=mf.filename)
+            flash("Restored " + mf.filename + ".", "ok")
+        finally:
+            conn.close()
+        return redirect(url_for("deleted_items"))
+
+    @app.post("/matters/<int:matter_id>/delete")
+    def delete_matter(matter_id: int):
+        conn = matters.connect()
+        try:
+            matter = matters.get_matter_any(conn, matter_id)
+            if matter is None:
+                abort(404)
+            # Re-checked server side. A client-only gate on an irreversible
+            # action is not a gate.
+            typed = (request.form.get("confirm_name") or "").strip()
+            if typed != matter.name.strip():
+                flash("The name you typed did not match, so nothing was "
+                      "deleted.", "error")
+                return redirect(url_for("matter_detail", matter_id=matter_id))
+            matters.soft_delete_matter(conn, matter_id)
+            audit.log_event("matter_deleted", matter_id=matter_id,
+                            name=matter.name, soft=True,
+                            recovery_days=matters.RECOVERY_WINDOW_DAYS)
+            flash("Deleted the matter " + matter.name + ". You can restore it "
+                  "for " + str(matters.RECOVERY_WINDOW_DAYS) + " days.", "ok")
+        finally:
+            conn.close()
+        return redirect(url_for("index"))
+
+    @app.post("/deleted/matters/<int:matter_id>/restore")
+    def restore_matter(matter_id: int):
+        conn = matters.connect()
+        try:
+            matter = matters.get_matter_any(conn, matter_id)
+            if matter is None:
+                abort(404)
+            matters.restore_matter(conn, matter_id)
+            audit.log_event("matter_restored", matter_id=matter_id,
+                            name=matter.name)
+            flash("Restored " + matter.name + ".", "ok")
+        finally:
+            conn.close()
+        return redirect(url_for("deleted_items"))
+
+    @app.get("/deleted")
+    def deleted_items():
+        conn = matters.connect()
+        try:
+            deleted_matters, deleted_files = matters.list_deleted(conn)
+        finally:
+            conn.close()
+        return render_template(
+            "deleted.html",
+            deleted_matters=deleted_matters, deleted_files=deleted_files,
+            days_remaining=matters.days_remaining,
+            window=matters.RECOVERY_WINDOW_DAYS,
+        )
+
+    # ----------------------------------------------------------------------
+    # Settings (Session 10) -- API keys and per-task models
+    # ----------------------------------------------------------------------
+    @app.get("/settings")
+    def settings():
+        catalogue = model_registry.available_models()
+        picker = model_registry.sort_for_picker(list(catalogue["models"]))
+        return render_template(
+            "settings.html",
+            openrouter_masked=_mask_key(os.environ.get("OPENROUTER_API_KEY")),
+            canlii_masked=_mask_key(os.environ.get("CANLII_API_KEY")),
+            env_path=first_run_wizard.env_path(),
+            catalogue=catalogue,
+            picker=picker,
+            preferences=model_registry.load_preferences(),
+            tasks=available_tasks(None),
+            default_model=model_registry.DEFAULT_MODEL,
+            exhaustive_model=exhaustive.EXHAUSTIVE_MODEL,
+        )
+
+    @app.post("/settings/keys")
+    def save_api_key():
+        which = (request.form.get("which") or "").strip()
+        value = (request.form.get("value") or "").strip()
+        if which not in ("openrouter", "canlii"):
+            abort(400)
+        if not value:
+            flash("No key was entered, so nothing was changed.", "warn")
+            return redirect(url_for("settings"))
+
+        # Tested before saving, against the same endpoints the first-run
+        # wizard uses.
+        if which == "openrouter":
+            ok, message = first_run_wizard.test_openrouter(value)
+            env_key = "OPENROUTER_API_KEY"
+        else:
+            ok, message = first_run_wizard.test_canlii(value)
+            env_key = "CANLII_API_KEY"
+        if not ok:
+            # `message` reports status codes only and never echoes the key.
+            flash("That key was not accepted: " + message, "error")
+            return redirect(url_for("settings"))
+
+        try:
+            _update_env_var(env_key, value)
+        except Exception as e:                                    # noqa: BLE001
+            flash("Could not save the key: " + type(e).__name__, "error")
+            return redirect(url_for("settings"))
+
+        # No key material, not even a length: a length narrows the search
+        # space and this log is retained indefinitely.
+        audit.log_event("api_key_changed", which=which, tested_ok=True)
+        flash("Key saved and verified. Tasks already running continue on the "
+              "previous key; new tasks use this one.", "ok")
+        return redirect(url_for("settings"))
+
+    @app.post("/settings/model")
+    def save_model_preference():
+        task = (request.form.get("task") or "").strip()
+        model_id = (request.form.get("model") or "").strip()
+        if task not in {t.id for t in available_tasks(None)}:
+            abort(400)
+        if model_id:
+            model_registry.save_preference(task, model_id)
+            flash("Model for " + task + " set to " + model_id + ".", "ok")
+        return redirect(request.referrer or url_for("settings"))
+
     @app.post("/matters/<int:matter_id>/sort")
     def set_matter_sort(matter_id: int):
         """Remember this matter's file ordering. A preference, not matter data:
@@ -665,6 +898,9 @@ def create_app() -> Flask:
             tasks=available_tasks(None), selected_task=DEFAULT_TASK,
             values={}, top_k="", reindex=False, limitation_signals=None,
             action=url_for("ad_hoc_query"), estimate_url="",
+            upload_accept=UPLOAD_ACCEPT,
+            picker=_task_picker(), task_model=_task_model(DEFAULT_TASK),
+            exhaustive_model=exhaustive.EXHAUSTIVE_MODEL,
         )
         defaults.update(kw)
         return render_template("ad_hoc.html", **defaults), status
@@ -695,6 +931,9 @@ def create_app() -> Flask:
             values={}, top_k="", limitation_signals=None, limitation_by_file=None,
             selected_file_id=None, selected_file_ids=[], scope_mode="all",
             estimate_url=url_for("estimate_exhaustive", matter_id=matter_id),
+            upload_accept=UPLOAD_ACCEPT,
+            picker=_task_picker(), task_model=_task_model(DEFAULT_TASK),
+            exhaustive_model=exhaustive.EXHAUSTIVE_MODEL,
             action=url_for("matter_query", matter_id=matter_id),
         )
         defaults.update(kw)
@@ -708,7 +947,7 @@ def create_app() -> Flask:
         'failed' row with the error rather than a silent gap."""
         filename = upload.filename
         suffix = Path(filename).suffix.lower()
-        if suffix not in (".pdf", ".eml"):
+        if suffix not in SUPPORTED_SUFFIXES:
             flash(f"{filename}: unsupported file type (use .pdf or .eml).", "error")
             return
 
@@ -723,11 +962,24 @@ def create_app() -> Flask:
             try:
                 row = matters.add_file_pending(
                     conn, matter.id, filename,
-                    "eml" if suffix == ".eml" else "pdf",
+                    suffix.lstrip("."),
                     sha, coll, str(stored),
                 )
             except matters.DuplicateFileInMatter as e:
-                flash(str(e), "warn")
+                # Session 10: the blocker may be a soft-deleted row. The
+                # lawyer's intent is unambiguous -- they want this file in the
+                # matter -- and refusing as a "duplicate" for a file they
+                # cannot see would be baffling.
+                prior = matters.find_deleted_file_by_hash(conn, matter.id, sha)
+                if prior is not None:
+                    matters.restore_file(conn, prior.id)
+                    audit.log_event("file_restored", matter_id=matter.id,
+                                    file_id=prior.id, filename=prior.filename,
+                                    via="re-upload")
+                    flash("This file was previously deleted and has been "
+                          "restored to the matter.", "ok")
+                else:
+                    flash(str(e), "warn")
                 return
             stored.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(tmp_path), str(stored))
@@ -748,10 +1000,16 @@ def create_app() -> Flask:
                 else:
                     matters.mark_file_ingested(conn, row.id)
                     flash(f"Added {filename}.", "ok")
+            except (ingest_docx.DocxPasswordProtected,
+                    ingest_xlsx.XlsxPasswordProtected) as e:
+                matters.mark_file_password_protected(conn, row.id, str(e))
+                flash(str(e), "warn")
+            except (ingest_docx.DocxUnreadable, ingest_xlsx.XlsxUnreadable) as e:
+                matters.mark_file_failed(conn, row.id, str(e))
+                flash(str(e), "error")
             except pipeline.PdfHasNoText as e:
                 matters.mark_file_no_text(conn, row.id, str(e))
-                flash(f"{filename}: no readable text found. Re-upload a "
-                      f"clearer scan or a text-based PDF.", "warn")
+                flash(f"{filename}: {e}", "warn")
             except Exception as e:
                 matters.mark_file_failed(conn, row.id, str(e))
                 flash(f"{filename}: ingest failed: {e}", "error")
@@ -786,6 +1044,12 @@ def create_app() -> Flask:
             try:
                 m = matters.create_matter(conn, name, description)
             except matters.DuplicateMatterName as e:
+                gone = matters.deleted_matter_named(conn, name)
+                if gone is not None:
+                    flash("A deleted matter is using this name. Restore it "
+                          "from Deleted items, or choose a different name.",
+                          "warn")
+                    return redirect(url_for("deleted_items"))
                 flash(str(e), "error")
                 return redirect(url_for("index"))
             flash(f"Created matter “{m.name}”.", "ok")
@@ -945,6 +1209,14 @@ def create_app() -> Flask:
                         error=" ".join(pleading_errors), **common
                     )
 
+            # Session 10: the model this task is set to. Applied for the run
+            # and recorded, so the result page and the audit log can both say
+            # what was asked for as well as what was used.
+            model_requested, model_warning = model_registry.resolve_model(task)
+            if model_warning:
+                flash(model_warning, "warn")
+            pipeline.set_model_override(model_requested)
+
             # Session 8: exhaustive runs take minutes (measured 169.5 s over a
             # 9-file matter), so they execute as a background task and the
             # browser is redirected to a run page. Everything below this is the
@@ -963,6 +1235,7 @@ def create_app() -> Flask:
 
                 state = runs.create(
                     matter_id=matter_id, task=task,
+                    model_requested=model_requested,
                     mode=(structured_inputs.get("detail_level")
                           or structured_inputs.get("mode") or "Exhaustive"),
                     model=exhaustive.EXHAUSTIVE_MODEL,
@@ -1082,6 +1355,9 @@ def create_app() -> Flask:
                     "matter_query",
                     matter_id=matter_id,
                     task=task,
+                    model_requested=model_requested,
+                    model_used=result.model,
+                    model_coerced=result.model != model_requested,
                     retrieved_file_ids=result.retrieved_file_ids,
                     # Only when the lawyer narrowed the scope: on the default
                     # path this stays absent, so existing audit records keep
@@ -1188,10 +1464,10 @@ def create_app() -> Flask:
                 status=400, error="Please choose a PDF or .eml file.", **common
             )
         suffix = Path(upload.filename).suffix.lower()
-        if suffix not in (".pdf", ".eml"):
+        if suffix not in SUPPORTED_SUFFIXES:
             return render_ad_hoc(
                 status=400,
-                error="Unsupported file type. Upload a .pdf or .eml file.",
+                error="Unsupported file type. Upload a .pdf, .docx, .xlsx or .eml file.",
                 **common,
             )
 

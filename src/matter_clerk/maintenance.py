@@ -425,3 +425,111 @@ def set_matter_sort(matter_id: int, order: str) -> None:
         p.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
     except Exception as e:                                        # noqa: BLE001
         log.warning(f"could not save sort preference: {e}")
+
+
+# --------------------------------------------------------------------------
+# Permanent deletion of expired soft-deleted items (Session 10)
+#
+# Runs on a BACKGROUND THREAD after the server is already listening, reusing
+# the pattern updater.start_background_check() established. Startup cost is
+# therefore zero rather than merely small -- a lawyer with a large backlog of
+# deletions should not wait on housekeeping to reach their matters.
+#
+# Bounded per launch so a big backlog is cleared over several launches instead
+# of one long pass, and wrapped so a failure can never affect startup.
+# --------------------------------------------------------------------------
+PURGE_BATCH = 25
+
+
+def purge_expired(limit: int = PURGE_BATCH) -> dict:
+    """Remove items whose 30-day recovery window has passed."""
+    from . import matters
+    from .vectorstore import connect, delete_collection
+
+    result = {"files": 0, "matters": 0, "errors": []}
+    db = matters.db_path()
+    if not db.is_file():
+        return result
+
+    conn = matters.connect()
+    try:
+        files, matter_rows = matters.due_for_purge(conn, limit=limit)
+
+        client = None
+        if files or matter_rows:
+            try:
+                client = connect()
+            except Exception as e:                                # noqa: BLE001
+                # No store, no collection cleanup. Leave the rows alone rather
+                # than dropping the manifest and orphaning the collections --
+                # the same reasoning as the Session 6a migration.
+                result["errors"].append(f"vector store unavailable: {type(e).__name__}")
+                return result
+
+        for row in files:
+            try:
+                if row.get("collection"):
+                    delete_collection(client, row["collection"])
+            except Exception as e:                                # noqa: BLE001
+                result["errors"].append(f"collection {row.get('collection')}: {type(e).__name__}")
+            _unlink_quietly(row.get("stored_path"))
+            matters.hard_delete_file(conn, row["id"])
+            result["files"] += 1
+            log_purge("file", row.get("filename"), row.get("matter_id"))
+
+        for row in matter_rows:
+            for f in conn.execute(
+                "SELECT * FROM files WHERE matter_id = ?", (row["id"],)
+            ).fetchall():
+                try:
+                    if f["collection"]:
+                        delete_collection(client, f["collection"])
+                except Exception as e:                            # noqa: BLE001
+                    result["errors"].append(f"collection {f['collection']}: {type(e).__name__}")
+                _unlink_quietly(f["stored_path"])
+            matters.hard_delete_matter(conn, row["id"])
+            result["matters"] += 1
+            log_purge("matter", row.get("name"), row["id"])
+    finally:
+        conn.close()
+    return result
+
+
+def _unlink_quietly(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        Path(path).unlink(missing_ok=True)
+    except Exception as e:                                        # noqa: BLE001
+        log.warning(f"could not remove {path}: {type(e).__name__}")
+
+
+def log_purge(kind: str, name: str | None, matter_id) -> None:
+    from . import audit
+
+    try:
+        audit.log_event("permanent_delete", kind=kind, name=name,
+                        matter_id=matter_id,
+                        after_days=30)
+    except Exception:                                             # noqa: BLE001
+        pass
+
+
+def start_purge_in_background() -> None:
+    """Kick off the purge on a daemon thread. Returns immediately."""
+    import threading
+
+    def worker() -> None:
+        try:
+            r = purge_expired()
+            if r["files"] or r["matters"]:
+                log.info(
+                    f"permanently removed {r['files']} file(s) and "
+                    f"{r['matters']} matter(s) past the 30-day window"
+                )
+            for err in r["errors"]:
+                log.warning(f"purge: {err}")
+        except Exception as e:                                    # noqa: BLE001
+            log.warning(f"purge failed, continuing: {type(e).__name__}: {e}")
+
+    threading.Thread(target=worker, daemon=True, name="purge-expired").start()

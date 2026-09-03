@@ -57,6 +57,11 @@
 </style>
 
 <div class="support-line">
+  <a href="{{ url_for('settings') }}">Settings</a>
+  &middot;
+  <a href="{{ url_for('deleted_items') }}">Deleted items</a>
+  &middot;
+
   <form method="post" action="{{ url_for('run_diagnostics') }}">
     <button type="submit" class="linklike"
             title="Creates a file describing your installation's structure -- no document text, matter names, file names or API keys -- for you to email to support.">Generate

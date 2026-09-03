@@ -37,6 +37,22 @@ So something on that machine put the store into a state not reachable by any of:
 
 **Do not** close this out on the grounds that the crash stopped being reported. The guard makes it invisible to the user; silence is now expected, and is no longer evidence that it is gone.
 
+## Word footnotes and endnotes are not extracted
+**Deferred from:** Phase 3 Session 9 (September 2, 2026)
+**Trigger to revisit:** When a real lawyer document depends on them — a memo whose authority sits in footnotes, or a contract with definitions in endnotes. Not before: there is currently nothing to test against.
+
+**Context:** Session 9 added Word ingestion. Footnotes and endnotes are excluded. `docs/SoW.docx` has `word/footnotes.xml` and `word/endnotes.xml` parts but zero `<w:footnoteReference>` elements, so no available sample exercises the feature.
+
+**Why it is not a small addition:** python-docx has no footnote API whatsoever. The text lives in a separate package part (`word/footnotes.xml`) and the body carries only `<w:footnoteReference w:id="N"/>` markers. Extracting them properly means parsing that part directly, mapping ids to text, and splicing each note back at its reference position so the note stays attached to the sentence it qualifies — a footnote rendered at the end of a chunk, detached from its marker, is worse than no footnote, because a citation would attribute it to the wrong passage.
+
+**Scope when revisited:**
+- Parse `word/footnotes.xml` and `word/endnotes.xml` from the docx zip.
+- Skip the separator and continuation-separator pseudo-notes (ids 0 and 1, and any `w:type` attribute), which carry no content.
+- Splice note text inline at the reference, with a marker that survives into the locator, e.g. `§2.3 Termination [fn 4]`.
+- Reuse the `w:t` walk from `_para_text` so tracked changes inside footnotes are handled the same way.
+
+**Check first:** whether python-docx has gained footnote support by then. It has been requested upstream for years; if it lands, most of this becomes unnecessary.
+
 ## Auto-open browser sometimes fails on double-click launch
 **Deferred from:** Phase 3 Session 3 verification (August 2026)
 **Trigger to revisit:** Session 5 (the installer creates a Start Menu shortcut, which is a shell launch — the same context that fails, so the installer makes this the *default* path rather than an edge case). Sooner if a lawyer reports it.

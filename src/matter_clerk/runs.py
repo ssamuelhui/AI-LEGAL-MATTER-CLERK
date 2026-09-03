@@ -83,6 +83,9 @@ class RunState:
     task: str
     mode: str
     model: str
+    # Session 10: what the lawyer selected, when exhaustive coerced it to
+    # something else. Empty when they match.
+    model_requested: str = ""
     status: str = QUEUED
     created_at: str = ""
     updated_at: str = ""
@@ -250,10 +253,11 @@ def release(matter_id: int, run_id: str) -> None:
 # Lifecycle
 # --------------------------------------------------------------------------
 def create(matter_id: int, task: str, mode: str, model: str,
-           scope_names: list[str]) -> RunState:
+           scope_names: list[str], model_requested: str = "") -> RunState:
     state = RunState(
         run_id=uuid.uuid4().hex[:16],
         matter_id=matter_id, task=task, mode=mode, model=model,
+        model_requested=model_requested,
         created_at=_now(), files_total=len(scope_names),
         scope_names=list(scope_names),
     )

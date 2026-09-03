@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import string
+import threading
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -314,6 +315,23 @@ def _config() -> tuple[str, str]:
     return embed_model, model
 
 
+# Session 10: a per-run model override, set by the web layer from the task's
+# saved preference. A thread-local rather than a parameter threaded through
+# eight call sites, because every task path already resolves its model through
+# _config() and adding an argument to all of them would be a wide change for a
+# narrow feature. None means "use MODEL from the environment", which is exactly
+# v1.0.4 behaviour.
+_MODEL_OVERRIDE = threading.local()
+
+
+def set_model_override(model_id: str | None) -> None:
+    _MODEL_OVERRIDE.value = model_id or None
+
+
+def get_model_override() -> str | None:
+    return getattr(_MODEL_OVERRIDE, "value", None)
+
+
 def _precheck_store(client) -> None:
     """Fail fast with a clear error if the store cannot be read.
 
@@ -355,7 +373,12 @@ def ingest_file(
     client = connect()
     _precheck_store(client)
 
-    is_email = path.suffix.lower() == ".eml"
+    # Session 9: suffix -> handler. PDF and email keep the exact code paths they
+    # had; Word and Excel are new branches beside them, never inside them.
+    suffix = path.suffix.lower()
+    is_email = suffix == ".eml"
+    is_docx = suffix == ".docx"
+    is_xlsx = suffix == ".xlsx"
     coll = collection or default_collection_name(path)
     needs_index = reindex or not collection_exists(client, coll)
 
@@ -382,10 +405,45 @@ def ingest_file(
     if is_email:
         email_metadata, email_body, attachment_warnings = extract_email(path)
 
+    format_stats: dict = {}
+
     chunk_count = 0
     if needs_index:
         log.info(f"Ingesting {source_name} ...")
-        if is_email:
+        if is_docx:
+            from .ingest_docx import extract_and_chunk as _docx_chunks
+
+            chunks, format_stats = _docx_chunks(path, source_name)
+            if not chunks:
+                raise PdfHasNoText(
+                    f"No readable text in {source_name}. The document may "
+                    "contain only images."
+                )
+            _assessed_pages = [(1, chr(10).join(c.text for c in chunks))]
+            log.info(
+                f"Extracted {format_stats['paragraph_blocks']} paragraph(s), "
+                f"{format_stats['tables']} table(s), "
+                f"{format_stats['headings']} heading section(s)"
+            )
+        elif is_xlsx:
+            from .ingest_xlsx import extract_and_chunk as _xlsx_chunks
+
+            chunks, format_stats = _xlsx_chunks(path, source_name)
+            if format_stats.get("formulas_without_values"):
+                raise PdfHasNoText(
+                    f"{source_name} contains formulas but no saved results. "
+                    "Open it in Excel and save it, then upload it again."
+                )
+            if not chunks:
+                raise PdfHasNoText(
+                    f"No readable data in {source_name}. Every sheet is empty."
+                )
+            _assessed_pages = [(1, chr(10).join(c.text for c in chunks))]
+            log.info(
+                f"Extracted {format_stats['rows']} row(s) across "
+                f"{format_stats['sheets']} sheet(s)"
+            )
+        elif is_email:
             if not email_body.strip():
                 raise PdfHasNoText(f"No extractable text in the body of {source_name}.")
             chunks = chunk_email(
@@ -504,6 +562,7 @@ def run_query(
     resolved_top_k = top_k if top_k is not None else template.top_k
 
     embed_model, model = _config()
+    model = get_model_override() or model
 
     # Ingest (or reuse the cached collection). For a matter file the caller
     # passes its persisted `collection`, so this is a no-op cache hit and only
@@ -851,6 +910,7 @@ def run_matter_query(
     else:
         resolved_top_k = template.top_k
     embed_model, model = _config()
+    model = get_model_override() or model
 
     client = connect()
     _precheck_store(client)
@@ -1053,6 +1113,7 @@ def run_compare_clauses(
         )
 
     embed_model, model = _config()
+    model = get_model_override() or model
     client = connect()
     _precheck_store(client)
 
