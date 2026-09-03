@@ -126,11 +126,23 @@ def _normalise(entry: dict) -> dict:
     model_id = entry.get("id") or ""
     provider = model_id.split("/", 1)[0] if "/" in model_id else ""
     price = _price_per_million(entry)
+    pricing = entry.get("pricing") or {}
+
+    def _per_million(field: str) -> float:
+        try:
+            return float(pricing.get(field) or 0) * 1_000_000
+        except (TypeError, ValueError):
+            return 0.0
+
     return {
         "id": model_id,
         "name": (entry.get("name") or model_id).strip(),
         "provider": provider,
         "price_per_million": round(price, 4),
+        # Session 11: kept separately so the pre-run estimator can price
+        # prompt and completion tokens properly rather than halving a total.
+        "prompt_per_million": round(_per_million("prompt"), 4),
+        "completion_per_million": round(_per_million("completion"), 4),
         "tier": tier_for(price),
         "context_length": entry.get("context_length") or 0,
     }
@@ -165,18 +177,20 @@ def _fallback_models() -> list[dict]:
     the tier badge, never a charge.
     """
     known = {
-        "xiaomi/mimo-v2.5-pro": ("MiMo v2.5 Pro", 1.30),
-        "anthropic/claude-opus-4.7": ("Claude Opus 4.7", 30.00),
-        "anthropic/claude-sonnet-5": ("Claude Sonnet 5", 12.00),
+        "xiaomi/mimo-v2.5-pro": ("MiMo v2.5 Pro", 0.43, 0.87),
+        "anthropic/claude-opus-4.7": ("Claude Opus 4.7", 5.00, 25.00),
+        "anthropic/claude-sonnet-5": ("Claude Sonnet 5", 2.00, 10.00),
     }
     out = []
     for model_id in RECOMMENDED_MODELS:
-        name, price = known.get(model_id, (model_id, 0.0))
+        name, p_in, p_out = known.get(model_id, (model_id, 0.0, 0.0))
+        price = p_in + p_out
         out.append({
             "id": model_id, "name": name,
             "provider": model_id.split("/", 1)[0],
-            "price_per_million": price, "tier": tier_for(price),
-            "context_length": 0,
+            "price_per_million": price,
+            "prompt_per_million": p_in, "completion_per_million": p_out,
+            "tier": tier_for(price), "context_length": 0,
         })
     return out
 

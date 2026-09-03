@@ -65,14 +65,54 @@ _ENC = tiktoken.get_encoding("cl100k_base")
 # --------------------------------------------------------------------------
 EXHAUSTIVE_MODEL = "anthropic/claude-opus-4.7"
 
-# USD per million tokens. Fetched from OpenRouter's /models endpoint on
-# 2026-09-01; re-check when the run summary's costs start looking wrong.
-MODEL_PRICING = {
+# USD per million tokens, for PRE-RUN ESTIMATES ONLY.
+#
+# Session 11: the recorded cost of a run is no longer computed from this table.
+# OpenRouter reports what it actually charged, and that figure is what the cost
+# log stores (see costs.py). This table survives solely to fill in the
+# confirmation dialog before a run, where a band is all that is claimed.
+#
+# It is also no longer the primary source even for that. Session 10 made all
+# 425 OpenRouter models selectable while this dict held three, with an
+# Opus-rate fallback -- so the dialog quoted a cheap model at roughly twenty
+# times its real price. Pricing now comes from model_registry's cached
+# catalogue, which covers every model; these three remain as a last resort for
+# a machine that has never reached the network.
+FALLBACK_PRICING = {
     "anthropic/claude-opus-4.7": (5.00, 25.00),
     "xiaomi/mimo-v2.5-pro": (0.43, 0.87),
     "xiaomi/mimo-v2.5": (0.14, 0.28),
 }
+
+# Used only when a model is in neither the catalogue nor the fallback table.
+# Deliberately the most expensive of the three known models rather than an
+# average: an estimate that is too high makes a lawyer hesitate, whereas one
+# that is too low makes them spend money they did not agree to.
 DEFAULT_PRICING = (5.00, 25.00)
+
+
+def pricing_for(model: str) -> tuple[float, float]:
+    """(prompt, completion) USD per 1M tokens for the estimate.
+
+    Prefers the live catalogue so every model is priced correctly; falls back
+    to the small table, then to the conservative default.
+    """
+    try:
+        from . import model_registry
+
+        for entry in model_registry.available_models()["models"]:
+            if entry["id"] == model:
+                # model_registry stores the summed prompt+completion price for
+                # its tier badge, so the split is re-read from the raw pricing
+                # it kept alongside it.
+                prompt = entry.get("prompt_per_million")
+                completion = entry.get("completion_per_million")
+                if prompt is not None and completion is not None:
+                    return float(prompt), float(completion)
+                break
+    except Exception:                                             # noqa: BLE001
+        pass
+    return FALLBACK_PRICING.get(model, DEFAULT_PRICING)
 
 # Conservative against a 1,000,000-token window. A reasoning model's quality
 # degrades well before its context limit does, so batch early rather than serve
@@ -153,7 +193,7 @@ def count_tokens(text: str) -> int:
 
 
 def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
-    p_in, p_out = MODEL_PRICING.get(model, DEFAULT_PRICING)
+    p_in, p_out = pricing_for(model)
     return (prompt_tokens / 1e6) * p_in + (completion_tokens / 1e6) * p_out
 
 
@@ -364,7 +404,7 @@ def estimate_run(texts: dict[str, list[str]], system_prompt: str = "",
 
     out_low = max(2_000, chunks * 80)
     out_high = max(8_000, chunks * 300)
-    p_in, p_out = MODEL_PRICING.get(model, DEFAULT_PRICING)
+    p_in, p_out = pricing_for(model)
     return {
         "files": len(texts),
         "chunks": chunks,

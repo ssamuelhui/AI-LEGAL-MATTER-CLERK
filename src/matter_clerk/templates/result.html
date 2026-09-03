@@ -115,6 +115,55 @@
 {# Session 7: the scope the lawyer chose, stated before the answer. Distinct
    from the "Drew on" provenance below, which reports what actually grounded
    the answer -- a file can be in scope and contribute nothing. #}
+{# Session 11: what this run cost. Placed above the answer so a lawyer
+   transcribing it into a billing system does not have to scroll past a
+   200-row table to find it. The dollar figure is the largest thing in the
+   block because it is the one item being copied out. #}
+{% if cost %}
+<div class="banner cost-banner">
+  <div class="cost-amount">
+    {% if cost.cost_usd is none %}Cost unknown{% else %}${{ '%.2f'|format(cost.cost_usd) }}{% endif %}
+  </div>
+  <div class="cost-detail">
+    This run &middot;
+    <code>{{ cost.model }}</code>{% if cost.was_exhaustive %} (exhaustive){% endif %}
+    {%- if cost.calls > 1 %} &middot; {{ cost.calls }} calls{% endif %} &middot;
+    {{ '{:,}'.format(cost.input_tokens) }} in /
+    {{ '{:,}'.format(cost.output_tokens) }} out tokens &middot;
+    {{ '%.1f'|format(cost.duration_seconds) }}s
+    {% if cost.cost_usd is not none %}
+    &middot;
+    <button type="button" class="linklike" id="copycost"
+            data-amount="{{ '%.2f'|format(cost.cost_usd) }}">copy amount</button>
+    {% endif %}
+    {% if cost.cost_usd is none %}
+    <div>OpenRouter did not report a cost for this run; the token counts above
+      are still recorded in the cost log.</div>
+    {% endif %}
+  </div>
+</div>
+<script>
+  (function () {
+    var b = document.getElementById("copycost");
+    if (!b) return;
+    b.addEventListener("click", function () {
+      var amount = b.dataset.amount;
+      // A lawyer pasting into a billing field wants the number, not a sentence.
+      var done = function () { b.textContent = "copied"; };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(amount).then(done, function () {});
+      } else {
+        var t = document.createElement("textarea");
+        t.value = amount;
+        document.body.appendChild(t); t.select();
+        try { document.execCommand("copy"); done(); } catch (e) {}
+        document.body.removeChild(t);
+      }
+    });
+  })();
+</script>
+{% endif %}
+
 {% if run_state %}
 <div class="banner info">
   <strong>Exhaustive analysis.</strong>

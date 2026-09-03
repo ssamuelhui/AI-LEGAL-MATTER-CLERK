@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import threading
 import traceback
 from pathlib import Path
@@ -25,9 +26,9 @@ from flask import (
 from werkzeug.serving import make_server
 
 from . import (
-    audit, canlii, citations, discovery, exhaustive, export, first_run_wizard,
-    ingest_docx, ingest_xlsx, llm, maintenance, matters, model_registry,
-    pipeline, pleadings, runs, updater,
+    audit, canlii, citations, costs, discovery, exhaustive, export,
+    first_run_wizard, ingest_docx, ingest_xlsx, llm, maintenance, matters,
+    model_registry, pipeline, pleadings, runs, updater,
 )
 from .prompts import (
     DEFAULT_TASK,
@@ -231,6 +232,14 @@ def build_system_prompt_for(template, form):
     )
 
 
+def _task_labels() -> dict:
+    """Task id -> label, so the cost log reads in the lawyer's vocabulary."""
+    try:
+        return {t.id: t.label for t in available_tasks(None)}
+    except Exception:                                             # noqa: BLE001
+        return {}
+
+
 def _task_picker():
     """Sorted model list for the task form. Never raises and never blocks:
     a failed fetch degrades to the three recommended models."""
@@ -245,6 +254,43 @@ def _task_picker():
 def _task_model(task: str) -> str:
     model_id, _warning = model_registry.resolve_model(task)
     return model_id
+
+
+def _finish_cost(acc, matter_name, started, *, status,
+                 detail: str = "", was_exhaustive: bool = False,
+                 run_id: str | None = None) -> dict | None:
+    """Write the cost row for a finished run and return it for the page.
+
+    Called from the success path and from the failure path alike, because the
+    tokens a failed run spent were still spent -- and a lawyer looking for
+    "why did that disappear" needs to find the attempt rather than silence.
+    """
+    import time as _time
+
+    if acc is None or getattr(acc, "_recorded", False):
+        return None
+    # Marked before the write, not after: the success path records here and the
+    # surrounding `finally` records only if this never ran. Without the flag a
+    # completed run would be billed twice.
+    acc._recorded = True
+    duration = round(_time.monotonic() - started, 2)
+    row_id = costs.record_from_accumulator(
+        acc, matter_name=matter_name, duration_seconds=duration,
+        was_exhaustive=was_exhaustive, status=status, detail=detail,
+        run_id=run_id,
+    )
+    return {
+        "id": row_id,
+        "cost_usd": None if acc.cost_unavailable else round(acc.cost_usd, 6),
+        "input_tokens": acc.input_tokens,
+        "output_tokens": acc.output_tokens,
+        "calls": acc.calls,
+        "model": (acc.models_used[0] if acc.models_used else acc.model),
+        "duration_seconds": duration,
+        "status": status,
+        "detail": detail,
+        "was_exhaustive": was_exhaustive,
+    }
 
 
 def _mask_key(value: str | None) -> str:
@@ -302,6 +348,24 @@ def _start_exhaustive(state, scope_files, task, structured_inputs, matter_id):
     Flask, does not lose a run the lawyer has already paid for.
     """
     def work(st):
+        import time as _time
+
+        started = _time.monotonic()
+        # Opened inside the worker: the accumulator is thread-local and this
+        # runs on a background thread, not on the request that launched it.
+        acc = llm.start_cost_run(task=task, matter_id=matter_id,
+                                 model=st.model)
+        matter_name = None
+        try:
+            c = matters.connect()
+            try:
+                m = matters.get_matter_any(c, matter_id)
+                matter_name = m.name if m else None
+            finally:
+                c.close()
+        except Exception:                                         # noqa: BLE001
+            pass
+
         def progress(batch, batches, names, run):
             runs.update(
                 st, batch=batch, batches=batches, current_files=list(names),
@@ -310,11 +374,21 @@ def _start_exhaustive(state, scope_files, task, structured_inputs, matter_id):
                 cost_usd=round(run.cost_usd, 4), seconds=round(run.seconds, 1),
             )
 
-        result = pipeline.run_exhaustive_matter_query(
-            files=scope_files, task=task, structured_inputs=structured_inputs,
-            matter_id=matter_id, progress=progress,
-            should_cancel=lambda: runs.cancel_requested(st.run_id),
-        )
+        try:
+            result = pipeline.run_exhaustive_matter_query(
+                files=scope_files, task=task,
+                structured_inputs=structured_inputs,
+                matter_id=matter_id, progress=progress,
+                should_cancel=lambda: runs.cancel_requested(st.run_id),
+            )
+        except Exception:
+            # Tokens spent before the failure were still spent.
+            _finish_cost(acc, matter_name, started,
+                         status=costs.STATUS_FAILED,
+                         detail=f"failed at batch {st.batch} of {st.batches}",
+                         was_exhaustive=True, run_id=st.run_id)
+            llm.end_cost_run()
+            raise
         runs.save_result(st.run_id, result.model_dump_json())
 
         cancelled = runs.cancel_requested(st.run_id)
@@ -324,6 +398,15 @@ def _start_exhaustive(state, scope_files, task, structured_inputs, matter_id):
             batch=st.batches or st.batch,
             collapsed_duplicates=getattr(result, "collapsed_duplicates", 0) or 0,
         )
+        _finish_cost(
+            acc, matter_name, started,
+            status=costs.STATUS_CANCELLED if cancelled else costs.STATUS_COMPLETED,
+            detail=(f"cancelled at batch {st.batch} of {st.batches}"
+                    if cancelled else ""),
+            was_exhaustive=True, run_id=st.run_id,
+        )
+        llm.end_cost_run()
+
         audit.log_event(
             "matter_query",
             matter_id=matter_id, task=task, mode=st.mode,
@@ -384,6 +467,7 @@ def _display_inputs(template, structured_inputs: dict) -> dict:
 def _render_result(
     result, template, task, structured_inputs, back_url, back_label, matter_name=None,
     scope_mode="all", scope_names=None, scope_total=0, run_state=None,
+    cost=None,
 ):
     """Render result.html. Shared by the ad-hoc and matter query paths; the only
     per-context difference is the back link."""
@@ -425,6 +509,8 @@ def _render_result(
         # be able to see WHICH model produced it and what it cost, especially
         # since exhaustive runs override the configured model.
         run_state=run_state,
+        # Session 11: what this run cost, for transcription into billing.
+        cost=cost,
         is_compare=is_compare,
         export_token=export_token,
         export_formats=export.list_export_formats(payload),
@@ -744,6 +830,55 @@ def create_app() -> Flask:
         finally:
             conn.close()
         return redirect(url_for("deleted_items"))
+
+    # ----------------------------------------------------------------------
+    # Task cost log (Session 11)
+    # ----------------------------------------------------------------------
+    def _cost_view(args):
+        """Shared query for the log page and the CSV export, so what a lawyer
+        exports is exactly what they were looking at."""
+        matter_id = args.get("matter")
+        matter_id = int(matter_id) if (matter_id or "").isdigit() else None
+        period = args.get("period") or "30"
+        sort = args.get("sort") or "timestamp"
+        direction = args.get("dir") or "desc"
+        date_from = (args.get("from") or "").strip() or None
+        date_to = (args.get("to") or "").strip() or None
+        conn = costs.connect()
+        try:
+            rows = costs.query(conn, matter_id=matter_id, period=period,
+                               sort=sort, direction=direction,
+                               date_from=date_from, date_to=date_to)
+            options = costs.matter_options(conn)
+        finally:
+            conn.close()
+        return rows, options, {
+            "matter": matter_id, "period": period, "sort": sort,
+            "dir": direction, "from": date_from or "", "to": date_to or "",
+        }
+
+    @app.get("/costs")
+    def cost_log():
+        rows, options, state = _cost_view(request.args)
+        total, count, unknown = costs.totals(rows)
+        return render_template(
+            "costs.html", rows=rows, matter_options=options, state=state,
+            total=total, count=count, unknown=unknown,
+            periods=costs.PERIODS, task_labels=_task_labels(),
+        )
+
+    @app.get("/costs.csv")
+    def cost_csv():
+        rows, _options, _state = _cost_view(request.args)
+        # utf-8-sig so Excel opens accented matter names without an import
+        # dialog -- an accountant should be able to double-click the file.
+        body = costs.to_csv(rows).encode("utf-8-sig")
+        resp = make_response(body)
+        resp.headers["Content-Type"] = "text/csv; charset=utf-8"
+        resp.headers["Content-Disposition"] = (
+            f'attachment; filename="{costs.csv_filename()}"'
+        )
+        return resp
 
     @app.get("/deleted")
     def deleted_items():
@@ -1249,6 +1384,18 @@ def create_app() -> Flask:
                                   matter_id)
                 return redirect(url_for("run_page", run_id=state.run_id))
 
+            cost_started = time.monotonic()
+            cost_status = costs.STATUS_FAILED
+            cost_detail = ""
+            matter_name_for_cost = None
+            try:
+                matter_name_for_cost = matters.get_matter_any(
+                    conn, matter_id).name
+            except Exception:                                     # noqa: BLE001
+                pass
+
+            cost_acc = llm.start_cost_run(
+                task=task, matter_id=matter_id, model=model_requested)
             try:
                 if mf is not None:
                     result = pipeline.run_query(
@@ -1350,6 +1497,14 @@ def create_app() -> Flask:
             # single-file branch (run_query has its own events) nor ad-hoc (no
             # matter_id). No query text / particulars: file IDs are the audit
             # signal and may not carry privileged content.
+            finally:
+                # A row exists whatever happened. A run that dies before
+                # reaching the model records $0.00 rather than nothing, so a
+                # lawyer looking for a vanished task finds the attempt.
+                if cost_acc is not None and not getattr(cost_acc, "_recorded", False):
+                    _finish_cost(cost_acc, matter_name_for_cost, cost_started,
+                                 status=cost_status, detail=cost_detail)
+                llm.end_cost_run()
             if mf is None:
                 audit.log_event(
                     "matter_query",
@@ -1367,6 +1522,11 @@ def create_app() -> Flask:
                 )
 
             matters.touch_last_queried(conn, matter_id)
+            cost_status = costs.STATUS_COMPLETED
+            cost_row = _finish_cost(
+                cost_acc, matter_name_for_cost, cost_started,
+                status=cost_status, detail=cost_detail,
+            )
             return _render_result(
                 result, template, task, structured_inputs,
                 back_url=url_for("matter_detail", matter_id=matter_id),
@@ -1375,6 +1535,7 @@ def create_app() -> Flask:
                 scope_mode=scope_mode_used,
                 scope_names=scope_names,
                 scope_total=scope_total,
+                cost=cost_row,
             )
         finally:
             conn.close()
@@ -1484,6 +1645,11 @@ def create_app() -> Flask:
         tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
         tmp.close()
         tmp_path = Path(tmp.name)
+        # Ad-hoc runs have no matter, so the cost row carries a NULL matter_id
+        # and reads as "(no matter)" in the log. The spend is still the firm's.
+        adhoc_started = time.monotonic()
+        adhoc_acc = llm.start_cost_run(task=task, matter_id=None,
+                                       model=_task_model(task))
         try:
             upload.save(str(tmp_path))
             try:
@@ -1506,10 +1672,17 @@ def create_app() -> Flask:
                 return render_ad_hoc(status=200, limitation_signals=e.signals, **common)
         finally:
             tmp_path.unlink(missing_ok=True)
+            if not getattr(adhoc_acc, "_recorded", False):
+                _finish_cost(adhoc_acc, None, adhoc_started,
+                             status=costs.STATUS_FAILED)
+            llm.end_cost_run()
 
+        adhoc_cost = _finish_cost(adhoc_acc, None, adhoc_started,
+                                  status=costs.STATUS_COMPLETED)
         return _render_result(
             result, template, task, structured_inputs,
             back_url=url_for("ad_hoc"), back_label="Run another task",
+            cost=adhoc_cost,
         )
 
     return app

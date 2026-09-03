@@ -533,3 +533,110 @@ def start_purge_in_background() -> None:
             log.warning(f"purge failed, continuing: {type(e).__name__}: {e}")
 
     threading.Thread(target=worker, daemon=True, name="purge-expired").start()
+
+
+# --------------------------------------------------------------------------
+# Cost backfill from the audit log (Session 11)
+#
+# Session 8 recorded exhaustive-run costs into audit.jsonl before task_costs
+# existed. Those are real firm spending and worth preserving, so they are
+# replayed into the table once, guarded by a marker file.
+#
+# Honest expectation: on the development install this recovers ONE row. Only
+# exhaustive runs ever carried cost, and one of the two entries is the zeroed
+# run from before the tally was fixed mid-Session-8. The mechanism is worth
+# having; the yield is not the point.
+# --------------------------------------------------------------------------
+MIGRATION_BACKFILL_COSTS = "0002_backfill_task_costs"
+
+
+def backfill_costs_from_audit() -> dict:
+    """Replay cost-bearing audit entries into task_costs."""
+    from . import audit, costs, matters
+
+    result = {"scanned": 0, "inserted": 0, "skipped": 0}
+    path = audit.audit_log_path()
+    if not path.is_file():
+        return result
+
+    conn = costs.connect()
+    try:
+        # Name lookup once, so a purged matter still gets a readable label.
+        names = {}
+        try:
+            for row in conn.execute("SELECT id, name FROM matters"):
+                names[row["id"]] = row["name"]
+        except Exception:                                         # noqa: BLE001
+            pass
+
+        seen = {
+            r["run_id"] for r in conn.execute(
+                "SELECT run_id FROM task_costs WHERE run_id IS NOT NULL")
+        }
+
+        # Streamed line by line: the log grows without bound over a firm's
+        # life, and there is no reason to hold it in memory.
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:                                 # noqa: BLE001
+                    continue
+                result["scanned"] += 1
+
+                if row.get("event") != "matter_query":
+                    continue
+                if "cost_usd" not in row:
+                    continue                  # non-exhaustive, or pre-Session-8
+                if not row.get("cost_usd"):
+                    result["skipped"] += 1    # the zeroed pre-fix run
+                    continue
+                run_id = row.get("run_id")
+                if run_id and run_id in seen:
+                    result["skipped"] += 1
+                    continue
+
+                matter_id = row.get("matter_id")
+                costs.record(
+                    task_id=row.get("task") or "unknown",
+                    matter_id=matter_id,
+                    matter_name=names.get(matter_id),
+                    model_used=row.get("model") or row.get("model_used"),
+                    input_tokens=row.get("prompt_tokens") or 0,
+                    output_tokens=row.get("completion_tokens") or 0,
+                    cost_usd=row.get("cost_usd"),
+                    duration_seconds=row.get("seconds"),
+                    was_exhaustive=bool(row.get("exhaustive")),
+                    status=(costs.STATUS_CANCELLED if row.get("cancelled")
+                            else costs.STATUS_COMPLETED),
+                    # Tagged so a later reader can tell a reconstructed figure
+                    # from one measured at the time.
+                    source="backfill",
+                    run_id=run_id,
+                    timestamp=row.get("timestamp"),
+                    conn=conn,
+                )
+                result["inserted"] += 1
+                if run_id:
+                    seen.add(run_id)
+    finally:
+        conn.close()
+    return result
+
+
+def run_cost_backfill() -> None:
+    """Run the backfill once. Never raises."""
+    try:
+        if _already_run(MIGRATION_BACKFILL_COSTS):
+            return
+        r = backfill_costs_from_audit()
+        _record_run(MIGRATION_BACKFILL_COSTS,
+                    f"scanned={r['scanned']} inserted={r['inserted']}")
+        if r["inserted"]:
+            log.info(f"recovered {r['inserted']} historical cost record(s) "
+                     "from the audit log")
+    except Exception as e:                                        # noqa: BLE001
+        log.warning(f"cost backfill failed, continuing: {type(e).__name__}: {e}")

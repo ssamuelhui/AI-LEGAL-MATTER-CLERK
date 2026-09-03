@@ -936,3 +936,71 @@ Exhaustive mode is unaffected: it pins `EXHAUSTIVE_MODEL` explicitly and never c
 Nothing key-shaped reaches a log. The audit entry for a key change records only which service and that the test passed.
 
 **Key changes never interrupt a running task**, and this needed no machinery: `LLMClient` reads the environment once at construction, and each task constructs its own. A task in flight finishes on the key it started with. A multi-batch exhaustive run holds one client for its whole life, so it completes on one key throughout — swapping mid-run would make half a result unattributable.
+
+## 2026-09-03: Cost is measured from the provider, never computed (Session 11)
+**Context:** The brief assumed cost would be calculated as `tokens x price`, with the price coming from Session 10's cached model catalogue, and asked what to do when a price changes between cache refreshes.
+**Decision:** Check the API before designing around it. OpenRouter returns what it actually charged.
+
+Verified live before any code was written: sending `extra_body={"usage": {"include": True}}` makes the response carry
+
+    "cost": 7.6e-07,
+    "cost_details": {"upstream_inference_cost": 7.6e-07,
+                     "upstream_inference_prompt_cost": 4.4e-07,
+                     "upstream_inference_completions_cost": 3.2e-07}
+
+So the recorded figure is the billed figure. There is no price table to keep current, no cache to invalidate, and no way for a stale price to make a billing record quietly wrong.
+
+A computed number would also have been wrong for three reasons a price table cannot see: prompt caching bills cached tokens differently, OpenRouter may route a request to a different upstream at a different price, and the catalogue may simply be out of date. Each of those produces a figure that is wrong *silently*, which for something a lawyer passes on to a client is the worst available failure mode.
+
+When a response carries no `cost` — an unusual provider, a future API change — the row records NULL and the log shows "Unknown", with token counts still stored. A blank that says so beats a total that is quietly short.
+
+## 2026-09-03: The accumulator lives in the client, not at the call sites
+**Context:** Three places construct an `LLMClient`: `pipeline._ask_model`, `exhaustive.run_exhaustive`, and `discovery`. Hooking cost capture at each of them is the obvious approach.
+**Decision:** Put it inside `LLMClient.complete()`, accumulating into a thread-local scope opened once per run.
+
+The invariant is what matters: a hook inside the client counts a new call site automatically, whereas a hook at each call site has to be remembered — and the failure mode of forgetting is a billing figure that is silently too low.
+
+That is not hypothetical here. **`discovery` makes TWO model calls per run** — concept extraction at `discovery.py:337` and case notes at `:608`. A per-call-site hook applied to the obvious one would have under-counted Suggest Relevant Cases by roughly half, indefinitely, with no symptom anywhere.
+
+Multiple calls in one run sum rather than double-count, because the scope is opened once by the caller and not once per call. Exhaustive runs open theirs inside the worker thread, since the accumulator is thread-local and the run executes off the request thread.
+
+Every path closes in a `finally`, so a run that dies before reaching the model still records $0.00 with status `failed`. A lawyer asking "why did that task disappear" needs to find the attempt rather than silence.
+
+## 2026-09-03: A pricing bug shipped in v1.0.5, in both directions
+**Context:** Session 8 wrote `exhaustive.MODEL_PRICING` with three models and `DEFAULT_PRICING = (5.00, 25.00)` — Opus rates. Session 10 then made all 425 OpenRouter models selectable and did not revisit it.
+**Decision:** Source estimates from `model_registry`, which covers the whole catalogue, and keep the three-model table only as an offline last resort.
+
+Measured after the fix:
+
+| model | v1.0.6 | v1.0.5 said |
+|---|---|---|
+| `mistralai/mistral-nemo` | $0.02 / $0.03 | $5.00 / $25.00 |
+| `anthropic/claude-opus-4.7` | $5.00 / $25.00 | correct |
+| `openai/o1-pro` | $150 / $600 | $5.00 / $25.00 |
+
+Note the direction. The obvious half of the bug quoted cheap models about 250x too high. The dangerous half quoted the most expensive models **30x too low** — a lawyer would have approved a run at a fraction of its real price. Recorded cost is now measured, so this affects only the pre-run estimate, but that estimate is exactly where a lawyer decides whether to spend the money.
+
+The unknown-model fallback stays deliberately high rather than average: an estimate that is too high makes someone hesitate, whereas one that is too low spends money they did not agree to.
+
+`model_registry` now also keeps prompt and completion prices separately, rather than only the summed figure it used for tier badges, so the estimator can price the two token streams properly instead of halving a total.
+
+## 2026-09-03: matter_name is denormalised onto every cost row
+**Context:** Session 10's purge hard-deletes matters 30 days after soft deletion. A cost row referencing one by id alone becomes unreadable the moment that happens.
+**Decision:** `matter_id` is a plain integer, deliberately NOT a foreign key, and the matter's name is copied onto the row at write time.
+
+A real foreign key would force one of two wrong outcomes: block the purge, or cascade the billing history away with the matter. Both are unacceptable for an accounting record — the money was spent whatever became of the matter afterwards.
+
+The log therefore renders three states: a live matter by name, a soft-deleted one as "Cresthaven (deleted)", and a purged one as "Cresthaven (removed)" from the stored copy. Verified end to end by soft-deleting and then hard-deleting a matter with costs against it and confirming the rows stayed readable by name.
+
+## 2026-09-03: CanLII is excluded, and the log says so
+**Decision:** Only OpenRouter spending is recorded. CanLII is a separate account with separate billing, and folding the two together would misstate both. The cost log states this on the page rather than leaving a lawyer to infer it from an absence.
+
+## 2026-09-03: Backfill recovers one row, and that was known in advance
+**Context:** Session 8 recorded exhaustive-run costs into `audit.jsonl` before `task_costs` existed.
+**Decision:** Replay them once, marker-guarded, streaming the file line by line.
+
+The honest yield was measured before the code was written: of 87 audit entries, exactly 2 carry `cost_usd`, and one is the zeroed run from before the tally bug was fixed mid-Session-8. So the backfill recovers **one** record. It is worth having — a real historical run is worth preserving and the mechanism is reusable — but nobody should expect it to populate a history.
+
+Rows are tagged `source="backfill"` so a later reader can distinguish a reconstructed figure from one measured at the time. Re-running inserts nothing, guarded by `run_id`.
+
+Audit log size is a non-issue at this scale (79 KB for 87 entries), but the parse streams anyway, since the file grows without bound over a firm's life.

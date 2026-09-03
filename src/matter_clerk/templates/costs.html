@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block subtitle %} &mdash; Task costs{% endblock %}
+{% block content %}
+
+{% macro sort_link(key, label) -%}
+  {%- set flip = 'asc' if (state.sort == key and state.dir == 'desc') else 'desc' -%}
+  <a href="{{ url_for('cost_log', matter=state.matter or '', period=state.period,
+                      sort=key, dir=flip, from=state['from'], to=state.to) }}">
+    {{ label }}{% if state.sort == key %} {{ '&darr;'|safe if state.dir == 'desc' else '&uarr;'|safe }}{% endif %}
+  </a>
+{%- endmacro %}
+
+<nav><a href="{{ url_for('index') }}">&larr; All matters</a></nav>
+
+<section class="block">
+  <div class="files-head">
+    <h2>Task costs</h2>
+    <a class="btn-small btn-export"
+       href="{{ url_for('cost_csv', matter=state.matter or '', period=state.period,
+                        sort=state.sort, dir=state.dir,
+                        from=state['from'], to=state.to) }}">Export to CSV</a>
+  </div>
+
+  <p class="sub">
+    What each task run cost through OpenRouter, as billed. CanLII searches are
+    a separate account and are not included here.
+  </p>
+
+  <form method="get" action="{{ url_for('cost_log') }}" class="cost-filters">
+    <label for="matter">Matter</label>
+    <select id="matter" name="matter" onchange="this.form.submit()">
+      <option value="">All matters</option>
+      {% for o in matter_options %}
+      <option value="{{ o.id }}" {% if state.matter == o.id %}selected{% endif %}>
+        {{ o.label }} ({{ o.n }})
+      </option>
+      {% endfor %}
+    </select>
+
+    <label for="period">Period</label>
+    <select id="period" name="period" onchange="this.form.submit()">
+      {% for key, label in periods.items() %}
+      <option value="{{ key }}" {% if state.period == key %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+
+    <label for="from">From</label>
+    <input type="date" id="from" name="from" value="{{ state['from'] }}">
+    <label for="to">To</label>
+    <input type="date" id="to" name="to" value="{{ state.to }}">
+    <button type="submit" class="btn-small">Apply</button>
+    <input type="hidden" name="sort" value="{{ state.sort }}">
+    <input type="hidden" name="dir" value="{{ state.dir }}">
+  </form>
+
+  {% if not rows %}
+  <p class="sub" style="margin-top:18px;">
+    No task runs in this period. Costs are recorded from v1.0.6 onward; earlier
+    runs were not measured, apart from exhaustive runs recovered from the audit
+    log.
+  </p>
+  {% else %}
+  <table class="file-table cost-table">
+    <thead>
+      <tr>
+        <th>{{ sort_link('timestamp', 'Date') }}</th>
+        <th>{{ sort_link('matter', 'Matter') }}</th>
+        <th>{{ sort_link('task', 'Task') }}</th>
+        <th>{{ sort_link('model', 'Model') }}</th>
+        <th class="num">{{ sort_link('cost', 'Cost') }}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td class="nowrap">{{ r.timestamp[:10] }}
+          <span class="meta">{{ r.timestamp[11:16] }}</span></td>
+        <td>{{ r.display_matter }}</td>
+        <td>{{ task_labels.get(r.task_id, r.task_id) }}
+          {% if r.was_exhaustive %}<span class="badge">exhaustive</span>{% endif %}
+        </td>
+        <td class="meta">{{ r.model_used or '&mdash;'|safe }}</td>
+        <td class="num">
+          {% if r.cost_usd is none %}
+            <span title="OpenRouter did not report a cost for this run. The token counts are still recorded.">Unknown</span>
+          {% else %}
+            ${{ '%.4f'|format(r.cost_usd) }}
+          {% endif %}
+          {% if r.status != 'completed' %}
+          <div class="meta status-{{ r.status }}">
+            {{ r.status }}{% if r.detail %} &mdash; {{ r.detail }}{% endif %}
+          </div>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="cost-total">
+    Filtered total: <strong>${{ '%.2f'|format(total) }}</strong>
+    across {{ count }} task{{ '' if count == 1 else 's' }}
+    {%- if unknown %}, {{ unknown }} with no cost reported{% endif %}.
+  </div>
+  {% endif %}
+</section>
+
+{% endblock %}

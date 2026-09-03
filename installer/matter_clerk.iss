@@ -8,7 +8,7 @@
 ; after build_windows.ps1 has produced dist\MatterClerk\.
 
 #define AppName        "Matter Clerk"
-#define AppVersion     "1.0.5"
+#define AppVersion     "1.0.6"
 #define AppPublisher   "Samuel"
 #define AppExeName     "MatterClerk.exe"
 #define SourceDir      "..\dist\MatterClerk"

@@ -81,3 +81,6 @@ matter-clerk-diagnostic-*.json
 # Session 10 runtime state (data directory = repo root in a checkout).
 /model_list_cache.json
 /user_preferences.json
+
+# Session 11: exported cost reports.
+task_costs_*.csv

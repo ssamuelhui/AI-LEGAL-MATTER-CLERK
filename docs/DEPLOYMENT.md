@@ -745,3 +745,71 @@ already-set variables).
 
 Masks hide length as well as value. No key material — and no key length —
 reaches any log. A running task finishes on the key it started with.
+
+---
+
+## 21. Task cost tracking (v1.0.6)
+
+One row per task run in `task_costs`, written whatever the outcome.
+
+### Where the number comes from
+
+OpenRouter's own `usage.cost`, requested via
+`extra_body={"usage": {"include": True}}` in `LLMClient._call`. **Not computed
+from a price table** — see ARCHITECTURE. A response without a cost field
+records NULL and displays as "Unknown"; token counts are still stored.
+
+### Where the hook lives
+
+`llm.CostAccumulator`, in a thread-local scope opened once per run by the web
+layer (`llm.start_cost_run` / `end_cost_run`, or the `cost_run` context
+manager). Every `LLMClient.complete()` adds to whatever scope is open.
+
+This is deliberate: a hook inside the client counts new call sites
+automatically. `discovery` makes two calls per run, so a per-call-site hook
+would have under-counted Suggest Relevant Cases by half.
+
+Exhaustive runs open their scope inside the worker thread, since the
+accumulator is thread-local.
+
+Every path closes in a `finally`, so a run that dies before the model still
+records `$0.00 · failed`.
+
+### Schema
+
+```
+task_costs(id, timestamp, matter_id, matter_name, task_id, model_used,
+           input_tokens, output_tokens, cost_usd, duration_seconds,
+           was_exhaustive, status, detail, calls, source, run_id)
+```
+
+`matter_id` is **not** a foreign key and `matter_name` is denormalised, so
+billing history survives Session 10's 30-day purge. Three display states: live,
+`(deleted)`, `(removed)`.
+
+`status` is `completed` / `failed` / `cancelled`. `source` is `measured` or
+`backfill`.
+
+### Pages
+
+`/costs` — the log, filterable by matter and period, sortable by any column,
+with a filtered total. `/costs.csv` exports the same view, `utf-8-sig` so Excel
+opens it directly. Linked from the matters footer and Settings.
+
+Result pages carry a cost banner above the answer with a copy-amount button.
+
+### Backfill
+
+`maintenance.run_cost_backfill()` replays cost-bearing `matter_query` entries
+from `audit.jsonl` once, marker-guarded, streamed. Only exhaustive runs from
+v1.0.3-v1.0.5 ever carried cost; zeroed entries are skipped. On the development
+install this recovers one row.
+
+### Pre-run estimates
+
+`exhaustive.pricing_for()` sources prices from `model_registry`'s catalogue
+(425 models), falling back to a three-model table then to a deliberately high
+default. This replaces `MODEL_PRICING`, which mispriced everything outside its
+three entries in **both** directions — see ARCHITECTURE.
+
+CanLII spending is not tracked here; it is a separate account.

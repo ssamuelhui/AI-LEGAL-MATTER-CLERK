@@ -145,6 +145,10 @@ def main(argv: list[str] | None = None) -> int:
     # passed. Background, bounded, and never able to delay startup.
     maintenance.start_purge_in_background()
 
+    # Session 11: replay historical exhaustive-run costs from the audit log
+    # into the cost table. Once, marker-guarded, and never fatal.
+    maintenance.run_cost_backfill()
+
     # --- 7. server -----------------------------------------------------------
     import logging
 
